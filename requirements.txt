@@ -1,0 +1,12 @@
+# Pinned so that a reviewer cloning this repo gets the versions it was built and
+# tested against.
+
+# Runtime
+Django==6.1.1
+pydantic==2.13.5
+python-dotenv==1.2.3
+
+# Development and tests
+pytest==9.1.1
+pytest-django==4.14.0
+ruff==0.16.7

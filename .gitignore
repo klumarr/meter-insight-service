@@ -1,0 +1,19 @@
+# Secrets. Never commit these.
+# .env holds the real API key; .env.example holds only the names of the keys.
+.env
+.env.*
+!.env.example
+
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
