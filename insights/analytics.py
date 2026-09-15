@@ -1,0 +1,286 @@
+"""
+Consumption analytics.
+
+This module is the arithmetic half of the service, and the half that has to be
+correct. It depends on nothing but the standard library: no Django, no Pydantic,
+and above all no language model. Every figure the service publishes is computed
+here, and every one of them is covered by a unit test that costs nothing to run.
+
+All arithmetic uses Decimal. Binary floating point cannot represent decimal
+fractions exactly, and over thousands of readings those errors accumulate into a
+total that does not match the customer's bill.
+"""
+
+import datetime as dt
+from collections.abc import Sequence
+from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
+from enum import StrEnum
+
+# The width of the window reported as the customer's peak usage period. Three
+# hours is wide enough to describe a habit ("your evening peak") rather than a
+# single spike.
+PEAK_WINDOW_HOURS = 3
+
+# A week-on-week figure is only published when the earlier week is at least this
+# well covered relative to the later one. See _week_on_week for why.
+MINIMUM_COMPARABLE_COVERAGE = Decimal("0.9")
+
+_PERCENT_PRECISION = Decimal("0.1")
+_HOURS_IN_DAY = 24
+
+
+class ReadingQuality(StrEnum):
+    """
+    How a reading came to exist.
+
+    ACTUAL is a real read taken from the meter. ESTIMATE is inferred from
+    historic usage, CALCULATED is derived from surrounding readings, and ZEROED
+    is a substituted zero. Only ACTUAL is direct evidence of what was consumed,
+    which is why the estimated share is reported to the customer at all.
+    """
+
+    ACTUAL = "ACTUAL"
+    ESTIMATE = "ESTIMATE"
+    CALCULATED = "CALCULATED"
+    ZEROED = "ZEROED"
+
+
+class NotEnoughReadingsError(ValueError):
+    """Raised when the reading set is too small to compute anything from."""
+
+
+@dataclass(frozen=True, slots=True)
+class Reading:
+    """
+    A single interval reading: the consumption recorded during one period.
+
+    The timestamp marks the end of the interval the value covers, and must be
+    timezone-aware.
+    """
+
+    timestamp: dt.datetime
+    value: Decimal
+    quality: ReadingQuality
+
+
+@dataclass(frozen=True, slots=True)
+class QualityBreakdown:
+    """How much consumption came from readings of one particular quality."""
+
+    quality: ReadingQuality
+    consumption_kwh: Decimal
+    reading_count: int
+    share_percent: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class PeakWindow:
+    """
+    The hours of the day during which the most consumption occurs.
+
+    Hours are given in the timezone the facts were computed in. end_hour is
+    exclusive and may be lower than start_hour, because a window can wrap past
+    midnight.
+    """
+
+    start_hour: int
+    end_hour: int
+    consumption_kwh: Decimal
+    share_percent: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class WeekOnWeekChange:
+    """
+    The change between the most recent seven days and the seven before them.
+
+    The two totals are carried alongside the percentage so that the figure can
+    be checked rather than taken on trust. They are grouped into one object
+    because a percentage without its baseline is not verifiable, and this way
+    the three values cannot become separated.
+    """
+
+    latest_week_kwh: Decimal
+    previous_week_kwh: Decimal
+    change_percent: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class ConsumptionFacts:
+    """
+    The complete set of figures derived from a reading set.
+
+    This is the only thing the language model is ever shown. It is small by
+    design: a handful of facts costs a few dozen tokens, where the readings they
+    came from would run to thousands.
+    """
+
+    period_start: dt.datetime
+    period_end: dt.datetime
+    days_covered: int
+    reading_count: int
+    total_consumption_kwh: Decimal
+    quality_breakdown: tuple[QualityBreakdown, ...]
+    estimated_share_percent: Decimal
+    peak_window: PeakWindow
+    week_on_week: WeekOnWeekChange | None
+    timezone_name: str
+
+
+def compute_facts(
+    readings: Sequence[Reading],
+    *,
+    timezone: dt.tzinfo = dt.UTC,
+    peak_window_hours: int = PEAK_WINDOW_HOURS,
+) -> ConsumptionFacts:
+    """
+    Reduce a set of interval readings to the facts the service reports.
+
+    `timezone` controls which local hours the peak window is expressed in. A
+    customer told their peak is "17:00 to 20:00" means their own clock, so
+    bucketing in UTC would be wrong for anywhere that is not on it.
+    """
+    if not readings:
+        raise NotEnoughReadingsError("at least one reading is required")
+
+    if not 1 <= peak_window_hours <= _HOURS_IN_DAY:
+        raise ValueError(f"peak_window_hours must be between 1 and 24, got {peak_window_hours}")
+
+    naive_count = sum(1 for reading in readings if reading.timestamp.tzinfo is None)
+    if naive_count:
+        raise ValueError(
+            "every reading timestamp must be timezone-aware, "
+            f"but {naive_count} of {len(readings)} were naive"
+        )
+
+    ordered = sorted(readings, key=lambda reading: reading.timestamp)
+    total = sum((reading.value for reading in ordered), Decimal(0))
+
+    return ConsumptionFacts(
+        period_start=ordered[0].timestamp,
+        period_end=ordered[-1].timestamp,
+        days_covered=(ordered[-1].timestamp - ordered[0].timestamp).days + 1,
+        reading_count=len(ordered),
+        total_consumption_kwh=total,
+        quality_breakdown=_quality_breakdown(ordered, total=total),
+        estimated_share_percent=_estimated_share_percent(ordered, total=total),
+        peak_window=_peak_window(ordered, timezone=timezone, width=peak_window_hours, total=total),
+        week_on_week=_week_on_week(ordered),
+        timezone_name=getattr(timezone, "key", str(timezone)),
+    )
+
+
+def _percentage(part: Decimal, whole: Decimal) -> Decimal:
+    if whole == 0:
+        return Decimal("0.0")
+    return (part / whole * 100).quantize(_PERCENT_PRECISION, rounding=ROUND_HALF_UP)
+
+
+def _quality_breakdown(
+    readings: Sequence[Reading], *, total: Decimal
+) -> tuple[QualityBreakdown, ...]:
+    consumption: dict[ReadingQuality, Decimal] = {}
+    counts: dict[ReadingQuality, int] = {}
+
+    for reading in readings:
+        consumption[reading.quality] = consumption.get(reading.quality, Decimal(0)) + reading.value
+        counts[reading.quality] = counts.get(reading.quality, 0) + 1
+
+    # Iterating the enum rather than the dict keeps the order fixed regardless of
+    # what order the readings arrived in. Step 7 caches on a hash of these facts,
+    # and a hash is only useful if identical input produces identical output.
+    return tuple(
+        QualityBreakdown(
+            quality=quality,
+            consumption_kwh=consumption[quality],
+            reading_count=counts[quality],
+            share_percent=_percentage(consumption[quality], total),
+        )
+        for quality in ReadingQuality
+        if quality in consumption
+    )
+
+
+def _estimated_share_percent(readings: Sequence[Reading], *, total: Decimal) -> Decimal:
+    """
+    The share of consumption that did not come from a real meter read.
+
+    Anything that is not ACTUAL is an inference of some kind, so ESTIMATE,
+    CALCULATED and ZEROED all count towards this figure.
+    """
+    actual = sum(
+        (reading.value for reading in readings if reading.quality is ReadingQuality.ACTUAL),
+        Decimal(0),
+    )
+    return _percentage(total - actual, total)
+
+
+def _peak_window(
+    readings: Sequence[Reading], *, timezone: dt.tzinfo, width: int, total: Decimal
+) -> PeakWindow:
+    hourly = [Decimal(0)] * _HOURS_IN_DAY
+    for reading in readings:
+        hourly[reading.timestamp.astimezone(timezone).hour] += reading.value
+
+    best_start = 0
+    best_total = Decimal(0)
+    for start in range(_HOURS_IN_DAY):
+        # The modulo lets a window wrap past midnight. Overnight usage is a real
+        # pattern, and a search that stopped at 23:00 would never find it.
+        window_total = sum(
+            (hourly[(start + offset) % _HOURS_IN_DAY] for offset in range(width)),
+            Decimal(0),
+        )
+        # Strictly greater, so the earliest of several equal windows wins and the
+        # result is deterministic.
+        if window_total > best_total:
+            best_total = window_total
+            best_start = start
+
+    return PeakWindow(
+        start_hour=best_start,
+        end_hour=(best_start + width) % _HOURS_IN_DAY,
+        consumption_kwh=best_total,
+        share_percent=_percentage(best_total, total),
+    )
+
+
+def _week_on_week(readings: Sequence[Reading]) -> WeekOnWeekChange | None:
+    """
+    Compare the last seven days against the seven before them.
+
+    Returns None rather than a number whenever the comparison would be
+    misleading. A confident figure derived from four days of history is worse
+    than no figure at all: the caller can omit what is absent, but cannot detect
+    that a number it was given is meaningless.
+    """
+    latest = readings[-1].timestamp
+    latest_week_start = latest - dt.timedelta(days=7)
+    previous_week_start = latest - dt.timedelta(days=14)
+
+    latest_week = [r for r in readings if latest_week_start < r.timestamp <= latest]
+    previous_week = [r for r in readings if previous_week_start < r.timestamp <= latest_week_start]
+
+    if not latest_week or not previous_week:
+        return None
+
+    # Comparing a full week against a partial one produces a large, confident and
+    # entirely artificial change, so the earlier week has to be comparably covered.
+    if len(previous_week) < len(latest_week) * MINIMUM_COMPARABLE_COVERAGE:
+        return None
+
+    latest_total = sum((reading.value for reading in latest_week), Decimal(0))
+    previous_total = sum((reading.value for reading in previous_week), Decimal(0))
+
+    # Percentage change from a zero baseline is undefined, not infinite.
+    if previous_total == 0:
+        return None
+
+    return WeekOnWeekChange(
+        latest_week_kwh=latest_total,
+        previous_week_kwh=previous_total,
+        change_percent=((latest_total - previous_total) / previous_total * 100).quantize(
+            _PERCENT_PRECISION, rounding=ROUND_HALF_UP
+        ),
+    )
