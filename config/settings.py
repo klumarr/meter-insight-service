@@ -53,3 +53,20 @@ LANGUAGE_CODE = "en-gb"
 TIME_ZONE = "UTC"
 USE_I18N = False
 USE_TZ = True
+
+
+# Language model
+# The key is read from the environment and has no default, so a missing key
+# fails loudly at call time rather than silently producing fallback responses.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+
+# An explicit timeout, because the default in most HTTP clients is either very
+# long or absent entirely. A request that hangs holds a worker open, and the
+# fallback can answer in microseconds, so waiting is never worth it.
+ANTHROPIC_TIMEOUT_SECONDS = float(os.environ.get("ANTHROPIC_TIMEOUT_SECONDS", "20"))
+
+# Three recommendations capped at 80 and 300 characters cannot need more than
+# this. The ceiling bounds the cost of a single call.
+ANTHROPIC_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "1024"))
