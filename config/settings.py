@@ -70,3 +70,24 @@ ANTHROPIC_TIMEOUT_SECONDS = float(os.environ.get("ANTHROPIC_TIMEOUT_SECONDS", "2
 # Three recommendations capped at 80 and 300 characters cannot need more than
 # this. The ceiling bounds the cost of a single call.
 ANTHROPIC_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "1024"))
+
+
+# Caching
+# In-memory and per-process, which is the honest choice for a service that runs
+# as a single container in this form. It is also a lie at scale: four workers
+# means four caches and four times the misses. Swapping in Redis is a settings
+# change and nothing else, because the code only ever talks to Django's cache
+# API, and that is the point of configuring it here rather than reaching for a
+# dictionary in the module that needs it.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "meter-insight",
+    }
+}
+
+# How long a set of model-written recommendations stays usable. Identical
+# readings produce an identical cache key, so this is not about correctness --
+# it bounds how long the service can keep serving wording from a prompt or a
+# model that has since been replaced.
+INSIGHT_CACHE_SECONDS = int(os.environ.get("INSIGHT_CACHE_SECONDS", "3600"))

@@ -7,8 +7,7 @@ energy-saving recommendations.
 The model never calculates a number and never sees a raw reading. It receives a
 handful of already-computed facts and turns them into prose.
 
-> Work in progress. Response caching and the eval suite are still to come,
-> along with measured latency and cost figures.
+> Work in progress. The eval suite is still to come.
 
 ## The endpoint
 
@@ -121,6 +120,35 @@ the numbers do not depend on which writer produced the sentence around them.
 
 Responses say which writer produced them, in a `source` field. Quietly serving
 templated text as though it were generated is how a silent outage lasts weeks.
+
+## Caching
+
+The cheapest call is the one that never happens. Identical readings reuse the
+wording written for them last time, measured on a 672-reading request:
+
+| | Latency | API cost |
+| --- | --- | --- |
+| Cache miss | ~2.8s | one call |
+| Cache hit | ~3ms | none |
+
+Two decisions in there are worth more than the speed.
+
+**Only the model's wording is cached, never the finished response.** Savings are
+recalculated from the facts on every request, so correcting an assumption in
+`analytics.py` takes effect immediately rather than being shadowed by an hour of
+cached arithmetic. The expensive, slow, non-deterministic half is cached; the
+cheap, instant, deterministic half is not.
+
+**A fallback is never cached.** It is generated in microseconds, so caching it
+saves nothing, and a thirty-second outage would otherwise pin templated text in
+front of every identical request until the entry expired. A transient failure
+should stay transient.
+
+The key is a hash of every input that could change the answer: the prompt, the
+model name, the system prompt and the tool schema. Leaving any of them out is
+how a service keeps serving wording written under yesterday's instructions for
+an hour after they changed. And because a cache is an optimisation, a backend
+that fails degrades to calling the model rather than to a 500.
 
 ## What the service refuses to say
 

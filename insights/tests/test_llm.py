@@ -14,6 +14,7 @@ from unittest import mock
 
 import anthropic
 import pytest
+from django.core.cache import cache
 
 from insights import analytics, llm, schemas
 from insights.tests import factories
@@ -378,6 +379,115 @@ class TestFallingBack:
         response = llm.generate_insights(factories.facts_with_week_on_week())
 
         assert response.source is schemas.InsightSource.MODEL
+
+
+class TestCaching:
+    def test_identical_facts_reuse_the_first_answer(self, client):
+        facts = factories.facts_with_week_on_week()
+
+        first = llm.generate_from_model(facts)
+        second = llm.generate_from_model(facts)
+
+        assert client.messages.create.call_count == 1
+        assert first.model_dump() == second.model_dump()
+
+    def test_different_facts_are_asked_about_separately(self, client):
+        llm.generate_from_model(factories.facts_with_week_on_week())
+        llm.generate_from_model(factories.facts_mostly_estimated())
+
+        assert client.messages.create.call_count == 2
+
+    def test_the_numbers_are_recalculated_rather_than_cached(self, monkeypatch, client):
+        """
+        The division the cache is built around.
+
+        Wording is expensive, slow and non-deterministic, so it is cached.
+        Savings are instant and deterministic, so they are not. Correcting an
+        assumption in analytics.py therefore takes effect on the very next
+        request instead of being shadowed by an hour of cached arithmetic.
+        """
+        facts = factories.facts_with_week_on_week()
+        first = llm.generate_from_model(facts)
+
+        monkeypatch.setattr(analytics, "SHIFTABLE_PEAK_SHARE", Decimal("0.30"))
+        second = llm.generate_from_model(facts)
+
+        assert client.messages.create.call_count == 1
+        assert first.recommendations[0].title == second.recommendations[0].title
+        # 15% then 30% of the same 415.80 kWh peak window, from the same words.
+        assert first.recommendations[0].estimated_saving_kwh == Decimal("62.37")
+        assert second.recommendations[0].estimated_saving_kwh == Decimal("124.74")
+
+    def test_a_fallback_is_never_cached(self, client):
+        """
+        A thirty-second outage should not pin templated text in front of every
+        identical request for the next hour. A transient failure stays
+        transient.
+        """
+        facts = factories.facts_with_week_on_week()
+        client.messages.create.side_effect = anthropic.APITimeoutError(request=mock.MagicMock())
+        assert llm.generate_insights(facts).source is schemas.InsightSource.FALLBACK
+
+        client.messages.create.side_effect = None
+        client.messages.create.return_value = tool_use_message(VALID_REPLY)
+
+        assert llm.generate_insights(facts).source is schemas.InsightSource.MODEL
+
+    def test_a_new_model_invalidates_the_cache(self, settings, client):
+        facts = factories.facts_with_week_on_week()
+        llm.generate_from_model(facts)
+
+        settings.ANTHROPIC_MODEL = "claude-something-newer"
+        llm.generate_from_model(facts)
+
+        assert client.messages.create.call_count == 2
+
+    def test_a_changed_system_prompt_invalidates_the_cache(self, monkeypatch, client):
+        """
+        Forgetting this is how a service keeps serving wording written under
+        yesterday's instructions for an hour after they were changed.
+        """
+        facts = factories.facts_with_week_on_week()
+        llm.generate_from_model(facts)
+
+        monkeypatch.setattr(llm, "SYSTEM_PROMPT", llm.SYSTEM_PROMPT + "\n- Be brief.")
+        llm.generate_from_model(facts)
+
+        assert client.messages.create.call_count == 2
+
+    def test_a_broken_cache_does_not_break_the_request(self, client):
+        """
+        A cache is an optimisation, and an optimisation that can take the
+        endpoint down is a liability.
+        """
+        with mock.patch("insights.llm.cache") as broken:
+            broken.get.side_effect = ConnectionError("cache is down")
+            broken.set.side_effect = ConnectionError("cache is down")
+
+            response = llm.generate_from_model(factories.facts_with_week_on_week())
+
+        assert response.recommendations
+        assert client.messages.create.call_count == 1
+
+    def test_an_entry_from_an_older_schema_is_treated_as_a_miss(self, client):
+        """
+        Trusting it would put output we no longer consider valid in front of a
+        customer. Discarding it costs one call.
+        """
+        facts = factories.facts_with_week_on_week()
+        cache.set(llm._cache_key(llm.build_prompt(facts)), {"recommendations": [{"title": "x"}]})
+
+        response = llm.generate_from_model(facts)
+
+        assert client.messages.create.call_count == 1
+        assert response.recommendations[0].title == "Shift laundry to later in the evening"
+
+    def test_the_key_does_not_contain_the_prompt(self):
+        """Backends limit key length and content; a prompt is long and unbounded."""
+        key = llm._cache_key(llm.build_prompt(factories.facts_with_week_on_week()))
+
+        assert "739.20" not in key
+        assert len(key) < 100
 
 
 class TestTheClient:
