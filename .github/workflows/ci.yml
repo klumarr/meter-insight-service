@@ -1,0 +1,47 @@
+name: CI
+
+# No API key is configured for this workflow, and that is deliberate rather
+# than an omission. The mocked suite must pass without one, so a fork or a pull
+# request from a stranger runs the whole thing with no secret to leak and no
+# spend to authorise. The live tests and the evals skip themselves.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A second push supersedes the first. Nothing is learned from finishing a run
+  # against a commit that has already been replaced.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check formatting
+        run: ruff format --check .
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Run the tests
+        # -m "not live" is belt and braces. The live tests already skip
+        # themselves without RUN_LIVE_LLM_TEST or RUN_LLM_EVALS, but a marker
+        # is a clearer statement of intent than relying on an env var being
+        # absent, and it fails loudly if that guard is ever removed.
+        run: pytest -m "not live" --tb=short

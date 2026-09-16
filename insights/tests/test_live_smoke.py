@@ -18,10 +18,13 @@ import pytest
 from insights import analytics, llm, schemas
 from insights.tests import factories
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("RUN_LIVE_LLM_TEST"),
-    reason="live API test: set RUN_LIVE_LLM_TEST=1 to run it",
-)
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        not os.environ.get("RUN_LIVE_LLM_TEST"),
+        reason="live API test: set RUN_LIVE_LLM_TEST=1 to run it",
+    ),
+]
 
 
 def test_a_real_call_returns_a_usable_response(capsys):

@@ -1,5 +1,7 @@
 # Meter Insight Service
 
+[![CI](https://github.com/klumarr/meter-insight-service/actions/workflows/ci.yml/badge.svg)](https://github.com/klumarr/meter-insight-service/actions/workflows/ci.yml)
+
 A small Django service that turns a list of meter readings into plain-English
 energy-saving recommendations.
 
@@ -309,6 +311,10 @@ The suite mocks the model, so it needs no API key, costs nothing and runs in
 under a second. That is not only convenience: a suite that needed a network
 could not assert anything about timeouts, malformed replies or repair attempts,
 which is most of what is worth testing here.
+
+It is also hermetic. CI runs it with no API key at all and no secret configured,
+so a pull request from a stranger runs the whole thing with nothing to leak and
+no spend to authorise.
 
 Two opt-in tests do call the real API — the eval suite above, and a single
 smoke test that proves the whole chain works end to end:

@@ -34,10 +34,13 @@ from insights import analytics, llm, schemas
 from insights.analytics import FactKey
 from insights.tests import factories
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_LLM_EVALS") != "1",
-    reason="Costs money and calls the real API. Set RUN_LLM_EVALS=1 to run.",
-)
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        os.environ.get("RUN_LLM_EVALS") != "1",
+        reason="Costs money and calls the real API. Set RUN_LLM_EVALS=1 to run.",
+    ),
+]
 
 # Hours of the day, day counts and small ordinals appear in perfectly good
 # sentences ("between 5pm and 8pm", "over 14 days") without being quoted from a
