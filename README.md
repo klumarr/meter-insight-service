@@ -30,6 +30,9 @@ Three things in here are worth more than the feature list:
 - **Several figures are deliberately withheld** even though they are
   arithmetically correct, because a true number can still support a false claim.
   [What the service refuses to say](#what-the-service-refuses-to-say).
+- **Measuring the token spend contradicted the design assumption.** The facts,
+  which the whole aggregation exists to keep small, are 16% of the input. The
+  schema is 70%. [Where the tokens go](#where-the-tokens-actually-go).
 
 If you have five minutes, read [`insights/analytics.py`](insights/analytics.py)
 for the arithmetic and [`insights/llm.py`](insights/llm.py) for the model
@@ -177,10 +180,10 @@ can be re-run after a model upgrade or a prompt edit.
 The cheapest call is the one that never happens. Identical readings reuse the
 wording written for them last time, measured on a 672-reading request:
 
-| | Latency | API calls |
+| | Latency | Cost |
 | --- | --- | --- |
-| Cache miss | ~2.8s | 1 |
-| Cache hit | ~3ms | 0 |
+| Cache miss | ~2.8s | ~$0.0029 |
+| Cache hit | ~3ms | nothing |
 
 Two decisions in there are worth more than the speed.
 
@@ -205,6 +208,50 @@ The backend is local memory, which is honest for a single container and a lie at
 four workers, where you would have four caches and four times the misses. Moving
 to Redis is a settings change only, because nothing in the code talks to
 anything but Django's cache API.
+
+## What a call costs
+
+Every call logs its token usage, because spend is invisible until something
+records it and "the bill went up" is a poor first indication. Prices are
+deliberately not hardcoded anywhere in the service: they change, they differ per
+model, and a rate baked into application code is a rate nobody remembers to
+update. Tokens are the fact; turning them into money is a billing concern.
+
+Measured across the four eval scenarios, at the rates listed for Claude Haiku
+4.5 when this was written ($1 and $5 per million input and output tokens):
+
+| | Tokens |
+| --- | --- |
+| Input | 1,371 – 1,494 (mean 1,436) |
+| Output | 208 – 339 (mean 291) |
+| Cost per call | ~$0.0029, or about 350 calls per dollar |
+
+A repaired reply costs two calls rather than one, which is the other reason the
+retry is capped at exactly one.
+
+### Where the tokens actually go
+
+This was the surprise. The whole aggregation design exists so that a year of
+half-hourly readings never reaches the model — thirty thousand rows reduced to a
+few hundred tokens of facts. That worked. It also turned out not to be where the
+budget was going:
+
+| | Tokens | Share |
+| --- | --- | --- |
+| The facts (user message) | 220 | 16% |
+| System prompt | 182 | 14% |
+| **Tool schema** | **940** | **70%** |
+
+Most of the input is the JSON schema attached to every call — the thing that
+makes the model's reply structured and validatable. That is a fair trade and I
+would make it again, but it is worth knowing that the expensive part was the
+contract, not the data.
+
+Pydantic emits a `"title": "Title"` on every field, duplicating the field name
+and telling the model nothing. Stripping those saves 90 tokens, 7% of input.
+It is left in: a schema post-processor is a thing to maintain and explain, and
+one definition that both instructs and validates the model is worth more than
+7%. At volume the arithmetic changes, and that is the first place I would look.
 
 ## The endpoint
 

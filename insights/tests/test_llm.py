@@ -51,7 +51,8 @@ DUPLICATE_CITATION_REPLY = {
 def tool_use_message(payload: dict, call_id: str = "toolu_test") -> SimpleNamespace:
     """A reply shaped like the SDK's, carrying the given tool arguments."""
     return SimpleNamespace(
-        content=[SimpleNamespace(type="tool_use", id=call_id, name=llm.TOOL_NAME, input=payload)]
+        content=[SimpleNamespace(type="tool_use", id=call_id, name=llm.TOOL_NAME, input=payload)],
+        usage=SimpleNamespace(input_tokens=612, output_tokens=147),
     )
 
 
@@ -393,6 +394,47 @@ class TestFallingBack:
         response = llm.generate_insights(factories.facts_with_week_on_week())
 
         assert response.source is schemas.InsightSource.MODEL
+
+
+class TestTokenAccounting:
+    def test_usage_is_logged_for_every_call(self, client, caplog):
+        """
+        Spend is invisible until something records it, and "the bill went up"
+        is a bad first indication.
+        """
+        with caplog.at_level("INFO"):
+            llm.generate_from_model(factories.facts_with_week_on_week())
+
+        assert any("612 input tokens, 147 output tokens" in r.message for r in caplog.records)
+
+    def test_a_retry_is_logged_as_a_second_call(self, client, caplog):
+        """A repaired reply costs two calls, and the log should show two."""
+        client.messages.create.side_effect = [
+            tool_use_message(SCHEMA_BREAKING_REPLY),
+            tool_use_message(VALID_REPLY),
+        ]
+
+        with caplog.at_level("INFO"):
+            llm.generate_from_model(factories.facts_with_week_on_week())
+
+        assert sum("Model call complete" in r.message for r in caplog.records) == 2
+
+    def test_a_reply_without_usage_does_not_break_the_request(self, client):
+        """
+        Telemetry that can raise is worse than telemetry that is missing. The
+        response shape belongs to a third party.
+        """
+        client.messages.create.return_value = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="tool_use", id="toolu_test", name=llm.TOOL_NAME, input=VALID_REPLY
+                )
+            ]
+        )
+
+        response = llm.generate_from_model(factories.facts_with_week_on_week())
+
+        assert response.recommendations
 
 
 class TestCaching:

@@ -81,6 +81,12 @@ class ToolCall:
 
     id: str
     payload: dict[str, Any]
+    # What the call cost, in the only unit the API actually reports. Prices are
+    # deliberately not converted here: they change, they differ per model, and a
+    # rate hardcoded in a service is a rate nobody remembers to update. Tokens
+    # are the fact; turning them into money is a billing concern.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 def generate_insights(facts: analytics.ConsumptionFacts) -> schemas.InsightResponse:
@@ -244,9 +250,24 @@ def request_recommendations(messages: list[dict[str, Any]]) -> ToolCall:
     except anthropic.APIError as error:
         raise LLMUnavailableError(f"the model could not be reached: {error}") from error
 
+    # getattr rather than attribute access: this is telemetry, and telemetry that
+    # can raise is worse than telemetry that is missing. The response shape is a
+    # third party's to change, and a request should not fail over accounting.
+    usage = getattr(message, "usage", None)
+    input_tokens = getattr(usage, "input_tokens", None)
+    output_tokens = getattr(usage, "output_tokens", None)
+    logger.info(
+        "Model call complete: %s input tokens, %s output tokens", input_tokens, output_tokens
+    )
+
     for block in message.content:
         if block.type == "tool_use" and block.name == TOOL_NAME:
-            return ToolCall(id=block.id, payload=dict(block.input))
+            return ToolCall(
+                id=block.id,
+                payload=dict(block.input),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
 
     # Forcing tool_choice makes this very unlikely, but "very unlikely" is not
     # "impossible" when the other end is a language model.
