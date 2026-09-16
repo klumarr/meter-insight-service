@@ -81,12 +81,20 @@ def _week_on_week_recommendation(
     if change is None:
         return None
 
+    # Three branches, not two. A change of exactly zero is neither a rise nor a
+    # fall, and an `else` on "did it rise?" called a flat week a fall of 0.0% and
+    # then congratulated the customer on whatever had caused it -- praise for an
+    # event that did not happen. The figure was right and the sentence was not,
+    # which is the failure this whole service is arranged around.
     if change.change_percent > 0:
         title = f"Your electricity use rose {change.change_percent}% on the previous week"
         closing = "Returning to the earlier level is the single easiest saving available."
-    else:
+    elif change.change_percent < 0:
         title = f"Your electricity use fell {abs(change.change_percent)}% on the previous week"
         closing = "Whatever changed is working, and is worth keeping up."
+    else:
+        title = "Your electricity use held steady on the previous week"
+        closing = "A settled baseline is what makes any future change easy to spot."
 
     return schemas.ModelRecommendation(
         title=title,

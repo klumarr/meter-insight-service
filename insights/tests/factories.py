@@ -108,6 +108,17 @@ def facts_without_week_on_week() -> analytics.ConsumptionFacts:
     return analytics.compute_facts(peaked_half_hourly(at(day=1), days=5, daily_kwh="48.00"))
 
 
+def facts_with_unchanged_usage() -> analytics.ConsumptionFacts:
+    """
+    Fourteen days at an identical daily total, so the change is exactly zero.
+
+    There is enough history for the comparison and the comparison found nothing.
+    That is a third outcome rather than a very small fall, and wording that only
+    knows about rises and falls has to describe it as one of them.
+    """
+    return analytics.compute_facts(peaked_half_hourly(at(day=1), days=14, daily_kwh="48.00"))
+
+
 def facts_with_falling_usage() -> analytics.ConsumptionFacts:
     """The mirror of facts_with_week_on_week: the later week is the lighter one."""
     start = at(day=1)

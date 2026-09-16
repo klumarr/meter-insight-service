@@ -125,6 +125,20 @@ class TestItOnlyStatesProvenFigures:
         assert "fell" in fallen_week.title
         assert "-" not in fallen_week.title
 
+    def test_a_week_that_did_not_change_is_neither_a_rise_nor_a_fall(self):
+        """
+        Found by clicking through the demo page rather than by a failing test.
+        Asking only "did it rise?" and treating everything else as a fall
+        reported an unchanged week as having "fell 0.0%", and then praised the
+        customer for the change that caused it.
+        """
+        response = fallback.build_fallback(factories.facts_with_unchanged_usage())
+
+        week = next(r for r in response.recommendations if r.based_on is FactKey.WEEK_ON_WEEK)
+        assert "rose" not in week.title
+        assert "fell" not in week.title
+        assert "0.0%" not in week.title
+
     def test_the_peak_window_wording_uses_the_customers_timezone(self):
         facts = factories.facts_without_week_on_week()
 
