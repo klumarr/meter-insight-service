@@ -7,8 +7,70 @@ energy-saving recommendations.
 The model never calculates a number and never sees a raw reading. It receives a
 handful of already-computed facts and turns them into prose.
 
-> Work in progress. The HTTP endpoint, response caching and the eval suite are
-> still to come, along with measured latency and cost figures.
+> Work in progress. Response caching and the eval suite are still to come,
+> along with measured latency and cost figures.
+
+## The endpoint
+
+```
+POST /api/insights
+```
+
+```jsonc
+{
+  "readings": [
+    {"timestamp": "2026-01-01T00:30:00+00:00", "value": "0.50", "quality": "ACTUAL"}
+  ],
+  "timezone": "Europe/London"   // optional, defaults to UTC
+}
+```
+
+`timezone` decides which local hours the peak window is expressed in. A customer
+told their peak is "17:00 to 20:00" means their own clock, so bucketing in UTC
+would be wrong for anywhere that is not on it.
+
+A `200` carries the recommendations, the facts they were derived from, and a
+`source` of `model` or `fallback`:
+
+```jsonc
+{
+  "source": "model",
+  "facts": {
+    "total_consumption_kwh": "672.00",
+    "peak_window": {"start_hour": 17, "end_hour": 20, "share_percent": "56.3"},
+    "week_on_week": null            // withheld: too little history to compare
+  },
+  "recommendations": [
+    {
+      "title": "Shift energy use away from peak evening hours",
+      "rationale": "Over 56% of your electricity is used between 5pm and 8pm...",
+      "based_on": "peak_window",    // the model chose the fact
+      "confidence": "high",
+      "estimated_saving_kwh": "56.70"   // analytics.py calculated the number
+    }
+  ]
+}
+```
+
+A `400` means the request itself is wrong, and says which field:
+
+```jsonc
+{
+  "error": "the request body did not match the expected schema",
+  "detail": [
+    {"type": "timezone_aware", "loc": ["readings", 0, "timestamp"],
+     "msg": "Input should have timezone info"}
+  ]
+}
+```
+
+The error reports which field was wrong rather than echoing the offending value
+back, because for a mistake at the root of the document that value is the entire
+request body.
+
+Client errors and third-party failures are kept apart deliberately. A malformed
+request is the caller's to fix and says so; a model that is slow or wrong is not
+their problem and never reaches them as an error.
 
 ## The problem this is built around
 

@@ -16,6 +16,7 @@ of the fact each recommendation rests on, and every figure is calculated from
 that by insights.analytics.
 """
 
+from collections import Counter
 from collections.abc import Iterable
 from decimal import Decimal
 from enum import StrEnum
@@ -179,30 +180,63 @@ class InsightResponse(BaseModel):
     recommendations: list[Recommendation]
 
 
-class UncitedFactError(ValueError):
+class CitationError(ValueError):
+    """Base class for the ways a set of citations can be unusable."""
+
+
+class UncitedFactError(CitationError):
     """Raised when the model attributes a recommendation to a fact it was never given."""
+
+
+class DuplicateCitationError(CitationError):
+    """Raised when two recommendations rest on the same fact."""
 
 
 def check_citations(response: ModelInsightResponse, facts: analytics.ConsumptionFacts) -> None:
     """
-    Reject a reply that cites a fact the model was not shown.
+    Reject a set of citations that cannot be trusted, for either of two reasons.
 
-    The static schema can only enforce that `based_on` is one of the four known
-    names. Whether a particular fact *exists* depends on the readings, since
-    week-on-week is withheld when there is too little history, so this check
-    needs the facts themselves.
+    A fact that was never supplied means the model invented its justification,
+    which makes the whole reply untrustworthy rather than just the one
+    recommendation. The static schema cannot catch this: it can only enforce
+    that `based_on` is one of the four known names, whereas whether a given
+    fact *exists* depends on the readings.
 
-    A model citing an absent fact has invented its justification, which makes
-    the whole reply untrustworthy rather than just that one recommendation. The
-    message is written to be fed straight back to the model on the retry.
+    The same fact cited twice is subtler, and every individual figure stays
+    correct while the set of them stops being. Each recommendation carries the
+    saving derived from the fact it names, so two resting on the same fact
+    report that one saving twice, and a caller adding them up is told a window
+    can yield twice what it holds.
+
+    Both problems are reported together, because there is only one retry and it
+    should not be spent learning about half of what was wrong. The messages are
+    written to be fed straight back to the model.
     """
     available = analytics.available_fact_keys(facts)
-    invented = {rec.based_on for rec in response.recommendations} - available
+    cited = [rec.based_on for rec in response.recommendations]
+
+    problems = []
+    invented = set(cited) - available
     if invented:
-        raise UncitedFactError(
+        problems.append(
             f"recommendations cite facts that were not provided: {_names(invented)}. "
             f"Only these facts are available: {_names(available)}."
         )
+
+    duplicated = {key for key, count in Counter(cited).items() if count > 1}
+    if duplicated:
+        problems.append(
+            f"the same fact is cited more than once: {_names(duplicated)}. Each "
+            "recommendation must be attributed to a different fact, because two "
+            "resting on the same fact report the same saving twice."
+        )
+
+    if not problems:
+        return
+
+    # Invention is the graver fault, so it names the error when both occur.
+    error_type = UncitedFactError if invented else DuplicateCitationError
+    raise error_type(" ".join(problems))
 
 
 def build_response(

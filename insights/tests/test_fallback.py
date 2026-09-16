@@ -70,6 +70,17 @@ class TestItObeysTheSameContract:
             ]
         )
 
+    def test_it_never_cites_the_same_fact_twice(self):
+        """
+        Free by construction here, since the fallback builds one recommendation
+        per fact. The model had to be policed into it.
+        """
+        for build in (factories.facts_with_week_on_week, factories.facts_mostly_estimated):
+            response = fallback.build_fallback(build())
+
+            cited = [r.based_on for r in response.recommendations]
+            assert len(cited) == len(set(cited))
+
     def test_every_recommendation_cites_an_available_fact(self):
         facts = factories.facts_without_week_on_week()
 

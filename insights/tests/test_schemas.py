@@ -154,6 +154,73 @@ class TestCitationChecking:
         assert "peak_window" in message
         assert "total_consumption" in message
 
+    def test_the_same_fact_cited_twice_is_rejected(self):
+        """
+        Found by running the service rather than by testing it.
+
+        The model returned two recommendations about the evening peak. Both
+        cited peak_window, so both carried the saving derived from it, and a
+        caller adding them up would be told a 378 kWh window could yield 113
+        kWh of savings when it can only yield 57.
+
+        Every individual figure was correct. The set of them was not, which is
+        why neither the schema nor the invented-fact check caught it.
+        """
+        facts = factories.facts_with_week_on_week()
+        response = schemas.ModelInsightResponse.model_validate(
+            {
+                "recommendations": [
+                    model_reply()["recommendations"][0],
+                    model_reply(title="Look again at the evening")["recommendations"][0],
+                ]
+            }
+        )
+
+        with pytest.raises(schemas.DuplicateCitationError, match="more than once"):
+            schemas.check_citations(response, facts)
+
+    def test_distinct_citations_are_accepted(self):
+        facts = factories.facts_with_week_on_week()
+        response = schemas.ModelInsightResponse.model_validate(
+            {
+                "recommendations": [
+                    model_reply(based_on="peak_window")["recommendations"][0],
+                    model_reply(based_on="week_on_week")["recommendations"][0],
+                    model_reply(based_on="total_consumption")["recommendations"][0],
+                ]
+            }
+        )
+
+        schemas.check_citations(response, facts)
+
+    def test_both_faults_are_reported_at_once(self):
+        """
+        There is only one retry, and it should not be spent learning about half
+        of what was wrong.
+        """
+        facts = factories.facts_without_week_on_week()
+        response = schemas.ModelInsightResponse.model_validate(
+            {
+                "recommendations": [
+                    model_reply(based_on="week_on_week")["recommendations"][0],
+                    model_reply(based_on="peak_window")["recommendations"][0],
+                    model_reply(based_on="peak_window", title="Again")["recommendations"][0],
+                ]
+            }
+        )
+
+        with pytest.raises(schemas.UncitedFactError) as error:
+            schemas.check_citations(response, facts)
+
+        message = str(error.value)
+        assert "were not provided" in message
+        assert "more than once" in message
+
+    def test_both_faults_share_a_base_class(self):
+        """insights.llm catches the base, so a new fault type cannot slip past it."""
+        assert issubclass(schemas.UncitedFactError, schemas.CitationError)
+        assert issubclass(schemas.DuplicateCitationError, schemas.CitationError)
+
 
 class TestBuildResponse:
     def test_the_saving_is_calculated_by_us_not_supplied_by_the_model(self):

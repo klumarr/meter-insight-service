@@ -37,6 +37,15 @@ UNCITED_FACT_REPLY = {
     "recommendations": [{**VALID_REPLY["recommendations"][0], "based_on": "week_on_week"}]
 }
 
+# Two recommendations about the same evening peak. Each is individually
+# well-formed and correctly cited; together they report one saving twice.
+DUPLICATE_CITATION_REPLY = {
+    "recommendations": [
+        VALID_REPLY["recommendations"][0],
+        {**VALID_REPLY["recommendations"][0], "title": "Look again at the evening"},
+    ]
+}
+
 
 def tool_use_message(payload: dict, call_id: str = "toolu_test") -> SimpleNamespace:
     """A reply shaped like the SDK's, carrying the given tool arguments."""
@@ -121,6 +130,25 @@ class TestPromptConstruction:
 
         assert facts.peak_window is None
         assert "peak_window" not in llm.build_prompt(facts)
+
+    def test_it_asks_for_no_more_recommendations_than_there_are_facts(self):
+        """
+        Each recommendation has to cite a different fact, so a household with
+        only two facts cannot support three. Asking for three anyway guarantees
+        a duplicate, and costs a retry to discover what we knew before calling.
+        """
+        two_facts = factories.facts_with_flat_usage()
+        four_facts = factories.facts_with_week_on_week()
+
+        assert len(analytics.available_fact_keys(two_facts)) == 2
+        assert "up to 2 recommendations" in llm.build_prompt(two_facts)
+        assert "up to 3 recommendations" in llm.build_prompt(four_facts)
+
+    def test_the_prompt_asks_for_distinct_facts(self):
+        assert "each citing a different fact" in llm.build_prompt(
+            factories.facts_with_week_on_week()
+        )
+        assert "Never cite the same fact twice" in llm.SYSTEM_PROMPT
 
     def test_figures_are_sent_as_strings_to_survive_json(self):
         summary = llm.summarise_facts(factories.facts_with_week_on_week())
@@ -218,6 +246,23 @@ class TestTheRepairAttempt:
         objection = client.messages.create.call_args_list[1].kwargs["messages"][2]["content"][0]
         assert "week_on_week" in objection["content"]
         assert "peak_window" in objection["content"]
+
+    def test_the_same_fact_cited_twice_is_retried(self, client):
+        """
+        The duplicate that double-counts a saving goes through the same repair
+        path as an invented citation: one retry, with the objection attached.
+        """
+        client.messages.create.side_effect = [
+            tool_use_message(DUPLICATE_CITATION_REPLY),
+            tool_use_message(VALID_REPLY),
+        ]
+
+        response = llm.generate_from_model(factories.facts_with_week_on_week())
+
+        assert client.messages.create.call_count == 2
+        objection = client.messages.create.call_args_list[1].kwargs["messages"][2]["content"][0]
+        assert "more than once" in objection["content"]
+        assert len(response.recommendations) == 1
 
     def test_it_retries_only_once(self, client):
         """A second bad reply is a pattern, not a blip. Stop paying for it."""

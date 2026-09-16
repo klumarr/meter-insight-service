@@ -37,6 +37,7 @@ Rules:
 - Use only the figures given to you. Never calculate, estimate or invent a number.
 - Do not state a saving. Savings are calculated elsewhere.
 - Attribute every recommendation to exactly one supplied fact, via `based_on`.
+- Each recommendation must cite a different fact. Never cite the same fact twice.
 - Only the facts listed below exist. Never refer to a fact that is not listed.
 - Write plainly, in British English, for someone who is not technical.
 - Order the recommendations with the most valuable first.\
@@ -125,11 +126,19 @@ def build_prompt(facts: analytics.ConsumptionFacts) -> str:
     tokens. Aggregating first is what makes the call fast, cheap and small
     enough that the model has nothing to get lost in.
     """
+    summary = summarise_facts(facts)
+
+    # Each recommendation must cite a different fact, so a household with only
+    # two facts to its name cannot support three of them. Asking for three
+    # anyway guarantees a duplicate, which costs the retry and probably the
+    # fallback to discover something we already knew before calling.
+    limit = min(schemas.MAX_RECOMMENDATIONS, len(summary))
+
     return (
         "Here are the only facts available about this household's electricity use.\n\n"
-        f"{json.dumps(summarise_facts(facts), indent=2)}\n\n"
-        f"Write up to {schemas.MAX_RECOMMENDATIONS} recommendations and submit them "
-        f"by calling the {TOOL_NAME} tool."
+        f"{json.dumps(summary, indent=2)}\n\n"
+        f"Write up to {limit} recommendations, each citing a different fact, and "
+        f"submit them by calling the {TOOL_NAME} tool."
     )
 
 
@@ -290,7 +299,7 @@ def parse_and_validate(
 
     try:
         schemas.check_citations(response, facts)
-    except schemas.UncitedFactError as error:
+    except schemas.CitationError as error:
         raise InvalidModelOutputError(str(error)) from error
 
     return response
