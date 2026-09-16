@@ -40,6 +40,9 @@ that have already been calculated for you.
 
 Rules:
 - Use only the figures given to you. Never calculate, estimate or invent a number.
+- Never derive a new figure from the ones given. No averages, no differences, no \
+subtracting a percentage from a hundred. If a number is not written below, it does \
+not exist.
 - Do not state a saving. Savings are calculated elsewhere.
 - Attribute every recommendation to exactly one supplied fact, via `based_on`.
 - Each recommendation must cite a different fact. Never cite the same fact twice.
@@ -179,9 +182,11 @@ def summarise_facts(facts: analytics.ConsumptionFacts) -> dict[str, Any]:
         analytics.FactKey.TOTAL_CONSUMPTION: {
             "total_kwh": str(facts.total_consumption_kwh),
             "days_covered": facts.days_covered,
+            "average_daily_kwh": str(facts.average_daily_kwh),
         },
         analytics.FactKey.ESTIMATED_SHARE: {
             "percent_not_from_a_real_meter_read": str(facts.estimated_share_percent),
+            "percent_from_a_real_meter_read": str(facts.measured_share_percent),
         },
     }
 

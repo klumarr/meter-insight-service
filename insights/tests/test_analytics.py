@@ -149,6 +149,59 @@ class TestEstimatedShare:
         assert facts.total_consumption_kwh == Decimal("0")
         assert facts.estimated_share_percent == Decimal("0.0")
 
+    def test_the_measured_share_is_published_as_well_as_the_estimated_one(self):
+        """
+        The complement, computed rather than left to be worked out.
+
+        An eval against the live model caught it subtracting the estimated
+        share from a hundred to write "100% accurate". Publishing both halves
+        removes the reason to.
+        """
+        facts = analytics.compute_facts(
+            [
+                reading(at(hour=0), "40", ReadingQuality.ACTUAL),
+                reading(at(hour=1), "60", ReadingQuality.ESTIMATE),
+            ]
+        )
+
+        assert facts.estimated_share_percent == Decimal("60.0")
+        assert facts.measured_share_percent == Decimal("40.0")
+
+
+class TestAverageDailyConsumption:
+    """
+    Derived from the total and the day count, and published anyway.
+
+    An eval caught the model dividing one by the other to write "which works
+    out to 48 kWh per day". The urge is a good one, so the figure is calculated
+    here where it is exact, rather than forbidden more loudly.
+    """
+
+    def test_divides_the_total_by_the_days_covered(self):
+        facts = analytics.compute_facts(half_hourly(at(day=1), days=5, value="1.00"))
+
+        assert facts.total_consumption_kwh == Decimal("240.00")
+        assert facts.days_covered == 5
+        assert facts.average_daily_kwh == Decimal("48.00")
+
+    def test_a_single_day_averages_to_its_own_total(self):
+        facts = analytics.compute_facts(hourly_day(dict.fromkeys(range(24), "2")))
+
+        assert facts.days_covered == 1
+        assert facts.average_daily_kwh == Decimal("48.00")
+
+    def test_an_inexact_division_is_rounded_rather_than_left_recurring(self):
+        """100 over 3 days. Decimal would otherwise carry the recurrence forever."""
+        facts = analytics.compute_facts(
+            [
+                reading(at(day=1), "50"),
+                reading(at(day=2), "25"),
+                reading(at(day=3), "25"),
+            ]
+        )
+
+        assert facts.average_daily_kwh == Decimal("33.33")
+
 
 class TestPeakWindow:
     def test_finds_the_highest_consuming_block_of_hours(self):

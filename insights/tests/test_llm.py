@@ -159,7 +159,21 @@ class TestPromptConstruction:
 
     def test_the_system_prompt_forbids_arithmetic(self):
         assert "Never calculate" in llm.SYSTEM_PROMPT
+        assert "Never derive a new figure" in llm.SYSTEM_PROMPT
         assert "Do not state a saving" in llm.SYSTEM_PROMPT
+
+    def test_figures_the_model_would_otherwise_work_out_are_supplied(self):
+        """
+        Both of these were added because an eval caught the model calculating
+        them: dividing the total by the days, and subtracting the estimated
+        share from a hundred. A model that needs a figure it was not given will
+        make one, so the cure is to give it.
+        """
+        summary = llm.summarise_facts(factories.facts_mostly_estimated())
+
+        assert summary["total_consumption"]["average_daily_kwh"] == "48.00"
+        assert summary["estimated_share"]["percent_from_a_real_meter_read"] == "28.6"
+        assert summary["estimated_share"]["percent_not_from_a_real_meter_read"] == "71.4"
 
 
 class TestTheCall:

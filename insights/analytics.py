@@ -160,8 +160,18 @@ class ConsumptionFacts:
     days_covered: int
     reading_count: int
     total_consumption_kwh: Decimal
+    # Derived from the two figures above, and published anyway. An eval against
+    # the live model caught it dividing one by the other to write "which works
+    # out to 48 kWh per day". The urge is a good one -- a daily average means
+    # more to a household than a fortnightly total -- so the answer is to
+    # calculate it here, where it is exact and tested, rather than to forbid it
+    # more loudly. A model that needs a figure it was not given will make one.
+    average_daily_kwh: Decimal
     quality_breakdown: tuple[QualityBreakdown, ...]
     estimated_share_percent: Decimal
+    # The complement of the line above, for the same reason. The model was
+    # caught subtracting it from a hundred to write "100% accurate".
+    measured_share_percent: Decimal
     peak_window: PeakWindow | None
     week_on_week: WeekOnWeekChange | None
     timezone_name: str
@@ -195,15 +205,19 @@ def compute_facts(
 
     ordered = sorted(readings, key=lambda reading: reading.timestamp)
     total = sum((reading.value for reading in ordered), Decimal(0))
+    days = (ordered[-1].timestamp - ordered[0].timestamp).days + 1
+    measured = _measured_consumption(ordered)
 
     return ConsumptionFacts(
         period_start=ordered[0].timestamp,
         period_end=ordered[-1].timestamp,
-        days_covered=(ordered[-1].timestamp - ordered[0].timestamp).days + 1,
+        days_covered=days,
         reading_count=len(ordered),
         total_consumption_kwh=total,
+        average_daily_kwh=_round_kwh(total / days),
         quality_breakdown=_quality_breakdown(ordered, total=total),
-        estimated_share_percent=_estimated_share_percent(ordered, total=total),
+        estimated_share_percent=_percentage(total - measured, total),
+        measured_share_percent=_percentage(measured, total),
         peak_window=_peak_window(ordered, timezone=timezone, width=peak_window_hours, total=total),
         week_on_week=_week_on_week(ordered),
         timezone_name=getattr(timezone, "key", str(timezone)),
@@ -300,18 +314,18 @@ def _quality_breakdown(
     )
 
 
-def _estimated_share_percent(readings: Sequence[Reading], *, total: Decimal) -> Decimal:
+def _measured_consumption(readings: Sequence[Reading]) -> Decimal:
     """
-    The share of consumption that did not come from a real meter read.
+    The consumption that came from a real meter read.
 
-    Anything that is not ACTUAL is an inference of some kind, so ESTIMATE,
-    CALCULATED and ZEROED all count towards this figure.
+    Only ACTUAL is direct evidence of what was used. ESTIMATE, CALCULATED and
+    ZEROED are all inferences of one kind or another, so everything else counts
+    towards the estimated share rather than this one.
     """
-    actual = sum(
+    return sum(
         (reading.value for reading in readings if reading.quality is ReadingQuality.ACTUAL),
         Decimal(0),
     )
-    return _percentage(total - actual, total)
 
 
 def _peak_window(

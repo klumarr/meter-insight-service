@@ -7,7 +7,7 @@ energy-saving recommendations.
 The model never calculates a number and never sees a raw reading. It receives a
 handful of already-computed facts and turns them into prose.
 
-> Work in progress. The eval suite is still to come.
+> Work in progress. Measured cost figures are still to come.
 
 ## The endpoint
 
@@ -214,3 +214,46 @@ One live test exercises the real API and is skipped unless asked for:
 ```bash
 RUN_LIVE_LLM_TEST=1 pytest insights/tests/test_live_smoke.py -s
 ```
+
+## Evals
+
+The mocked suite proves the code handles a bad reply correctly. It can never
+tell you how often a bad reply actually happens. The evals answer that: they
+call the live model and assert properties of what comes back.
+
+```bash
+RUN_LLM_EVALS=1 pytest insights/tests/test_evals.py -v
+```
+
+They check that no fact is cited twice, that every citation is a fact that
+exists, that a withheld peak is never discussed, that heavily estimated data is
+flagged to the customer, and above all that no number appears which cannot be
+traced to a supplied figure.
+
+An eval failing does not necessarily mean this repository is broken. A model
+update, or simply a different sample, can break one that passed yesterday. That
+is the point of having them: the failure is information about the model, and
+the fix is usually a prompt change rather than a code change.
+
+### What they found
+
+Running them turned up the model performing arithmetic it had been told not to,
+in 2 of 20 sampled calls:
+
+| What it wrote | The sum it did |
+| --- | --- |
+| "which works out to 48 kWh per day" | 240 ÷ 5 |
+| "your readings are 100% accurate" | 100 − 0.0 |
+
+Both figures were correct here, which is exactly what makes the behaviour
+dangerous: the same reflex on numbers that do not divide cleanly produces a
+confident, plausible, wrong figure.
+
+The fix was not to forbid it more loudly. A daily average means more to a
+household than a fortnightly total, so the urge was a good one — the problem was
+that the model had to calculate it. Both figures are now computed in
+`analytics.py`, where they are exact and tested, and supplied in the prompt. The
+rate went from 2/20 to 0/20.
+
+**A model that needs a figure it was not given will make one.** That was worth
+finding out from a test rather than from a customer.
