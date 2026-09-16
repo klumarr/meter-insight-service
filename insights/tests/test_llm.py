@@ -2,9 +2,9 @@
 Tests for the model boundary.
 
 The model is mocked throughout, so these are free, instant and deterministic.
-That is not only a convenience: if this file needed a network, it could not
-assert anything about timeouts or malformed replies, which is most of what
-matters here.
+That is not only a convenience: if this file needed a network it could not
+assert anything about timeouts, malformed replies or repair attempts, which is
+most of what matters here.
 """
 
 import json
@@ -29,11 +29,19 @@ VALID_REPLY = {
     ]
 }
 
+SCHEMA_BREAKING_REPLY = {
+    "recommendations": [{"title": "No rationale given", "based_on": "peak_window"}]
+}
 
-def tool_use_message(payload: dict) -> SimpleNamespace:
+UNCITED_FACT_REPLY = {
+    "recommendations": [{**VALID_REPLY["recommendations"][0], "based_on": "week_on_week"}]
+}
+
+
+def tool_use_message(payload: dict, call_id: str = "toolu_test") -> SimpleNamespace:
     """A reply shaped like the SDK's, carrying the given tool arguments."""
     return SimpleNamespace(
-        content=[SimpleNamespace(type="tool_use", name=llm.TOOL_NAME, input=payload)]
+        content=[SimpleNamespace(type="tool_use", id=call_id, name=llm.TOOL_NAME, input=payload)]
     )
 
 
@@ -96,21 +104,16 @@ class TestPromptConstruction:
 
 class TestTheCall:
     def test_a_valid_reply_becomes_an_insight_response(self, client):
-        facts = factories.facts_with_week_on_week()
-
-        response = llm.generate_insights(facts)
+        response = llm.generate_from_model(factories.facts_with_week_on_week())
 
         assert response.source is schemas.InsightSource.MODEL
         assert response.recommendations[0].title == "Shift laundry to later in the evening"
 
     def test_the_saving_is_ours_even_though_the_wording_is_the_models(self, client):
         """The whole architecture in one assertion."""
-        client.messages.create.return_value = tool_use_message(
-            {"recommendations": [{**VALID_REPLY["recommendations"][0], "based_on": "week_on_week"}]}
-        )
-        facts = factories.facts_with_week_on_week()
+        client.messages.create.return_value = tool_use_message(UNCITED_FACT_REPLY)
 
-        response = llm.generate_insights(facts)
+        response = llm.generate_from_model(factories.facts_with_week_on_week())
 
         assert response.recommendations[0].estimated_saving_kwh == Decimal("67.20")
 
@@ -119,7 +122,7 @@ class TestTheCall:
         A request with no timeout can hang for as long as the far end likes,
         holding a worker open the whole time.
         """
-        llm.generate_insights(factories.facts_with_week_on_week())
+        llm.generate_from_model(factories.facts_with_week_on_week())
 
         assert client.messages.create.call_args.kwargs["timeout"] == 20
 
@@ -128,16 +131,86 @@ class TestTheCall:
         "Please reply in JSON" is a request a model may decline. A forced tool
         call is not.
         """
-        llm.generate_insights(factories.facts_with_week_on_week())
+        llm.generate_from_model(factories.facts_with_week_on_week())
 
         kwargs = client.messages.create.call_args.kwargs
         assert kwargs["tool_choice"] == {"type": "tool", "name": llm.TOOL_NAME}
         assert kwargs["tools"][0]["input_schema"]["properties"]["recommendations"]
 
     def test_output_length_is_capped(self, client):
-        llm.generate_insights(factories.facts_with_week_on_week())
+        llm.generate_from_model(factories.facts_with_week_on_week())
 
         assert client.messages.create.call_args.kwargs["max_tokens"] == 1024
+
+
+class TestTheRepairAttempt:
+    def test_a_rejected_reply_is_retried_once_and_can_succeed(self, client):
+        client.messages.create.side_effect = [
+            tool_use_message(SCHEMA_BREAKING_REPLY),
+            tool_use_message(VALID_REPLY),
+        ]
+
+        response = llm.generate_from_model(factories.facts_with_week_on_week())
+
+        assert response.recommendations[0].title == "Shift laundry to later in the evening"
+        assert client.messages.create.call_count == 2
+
+    def test_the_retry_shows_the_model_its_own_rejected_output(self, client):
+        """
+        Being told "that was wrong" repairs far less reliably than being shown
+        what you said alongside the objection to it.
+        """
+        client.messages.create.side_effect = [
+            tool_use_message(SCHEMA_BREAKING_REPLY),
+            tool_use_message(VALID_REPLY),
+        ]
+
+        llm.generate_from_model(factories.facts_with_week_on_week())
+
+        retry_messages = client.messages.create.call_args_list[1].kwargs["messages"]
+        assistant_turn = retry_messages[1]
+        objection = retry_messages[2]["content"][0]
+        assert assistant_turn["role"] == "assistant"
+        assert assistant_turn["content"][0]["input"] == SCHEMA_BREAKING_REPLY
+        assert objection["type"] == "tool_result"
+        assert objection["is_error"] is True
+        assert "rationale" in objection["content"].lower()
+
+    def test_an_invented_citation_is_explained_back_to_the_model(self, client):
+        client.messages.create.side_effect = [
+            tool_use_message(UNCITED_FACT_REPLY),
+            tool_use_message(VALID_REPLY),
+        ]
+
+        llm.generate_from_model(factories.facts_without_week_on_week())
+
+        objection = client.messages.create.call_args_list[1].kwargs["messages"][2]["content"][0]
+        assert "week_on_week" in objection["content"]
+        assert "peak_window" in objection["content"]
+
+    def test_it_retries_only_once(self, client):
+        """A second bad reply is a pattern, not a blip. Stop paying for it."""
+        client.messages.create.side_effect = [
+            tool_use_message(SCHEMA_BREAKING_REPLY),
+            tool_use_message(SCHEMA_BREAKING_REPLY),
+        ]
+
+        with pytest.raises(llm.InvalidModelOutputError):
+            llm.generate_from_model(factories.facts_with_week_on_week())
+
+        assert client.messages.create.call_count == 2
+
+    def test_an_unreachable_model_is_not_retried(self, client):
+        """
+        Retrying a timeout just spends a second timeout to learn the same
+        thing. The fallback can answer immediately instead.
+        """
+        client.messages.create.side_effect = anthropic.APITimeoutError(request=mock.MagicMock())
+
+        with pytest.raises(llm.LLMUnavailableError):
+            llm.generate_from_model(factories.facts_with_week_on_week())
+
+        assert client.messages.create.call_count == 1
 
 
 class TestFailureModes:
@@ -145,13 +218,13 @@ class TestFailureModes:
         client.messages.create.side_effect = anthropic.APITimeoutError(request=mock.MagicMock())
 
         with pytest.raises(llm.LLMUnavailableError, match="did not respond within 20"):
-            llm.generate_insights(factories.facts_with_week_on_week())
+            llm.generate_from_model(factories.facts_with_week_on_week())
 
     def test_an_api_error_is_reported_as_unavailable(self, client):
         client.messages.create.side_effect = anthropic.APIConnectionError(request=mock.MagicMock())
 
         with pytest.raises(llm.LLMUnavailableError):
-            llm.generate_insights(factories.facts_with_week_on_week())
+            llm.generate_from_model(factories.facts_with_week_on_week())
 
     def test_a_missing_api_key_fails_loudly(self, settings):
         """
@@ -161,29 +234,7 @@ class TestFailureModes:
         settings.ANTHROPIC_API_KEY = ""
 
         with pytest.raises(llm.LLMUnavailableError, match="ANTHROPIC_API_KEY"):
-            llm.generate_insights(factories.facts_with_week_on_week())
-
-    def test_a_reply_breaking_the_schema_is_rejected(self, client):
-        client.messages.create.return_value = tool_use_message(
-            {"recommendations": [{"title": "No rationale given", "based_on": "peak_window"}]}
-        )
-
-        with pytest.raises(llm.InvalidModelOutputError):
-            llm.generate_insights(factories.facts_with_week_on_week())
-
-    def test_a_reply_citing_an_unavailable_fact_is_rejected(self, client):
-        """
-        Correctly shaped, and still untrustworthy.
-
-        There was too little history to derive a week-on-week figure, so it was
-        never in the prompt. Citing it is proof the justification was invented.
-        """
-        client.messages.create.return_value = tool_use_message(
-            {"recommendations": [{**VALID_REPLY["recommendations"][0], "based_on": "week_on_week"}]}
-        )
-
-        with pytest.raises(llm.InvalidModelOutputError, match="week_on_week"):
-            llm.generate_insights(factories.facts_without_week_on_week())
+            llm.generate_from_model(factories.facts_with_week_on_week())
 
     def test_a_reply_that_never_calls_the_tool_is_rejected(self, client):
         client.messages.create.return_value = SimpleNamespace(
@@ -191,24 +242,74 @@ class TestFailureModes:
         )
 
         with pytest.raises(llm.InvalidModelOutputError, match="without calling"):
-            llm.generate_insights(factories.facts_with_week_on_week())
+            llm.generate_from_model(factories.facts_with_week_on_week())
 
     def test_the_two_failure_kinds_are_distinguishable(self):
         """
-        Step 5 needs to tell them apart: a bad reply is worth one retry with
-        feedback, an unreachable model is not.
+        The distinction the repair loop depends on: a bad reply is worth one
+        retry with feedback, an unreachable model is not.
         """
         assert issubclass(llm.LLMUnavailableError, llm.LLMError)
         assert issubclass(llm.InvalidModelOutputError, llm.LLMError)
         assert not issubclass(llm.InvalidModelOutputError, llm.LLMUnavailableError)
 
 
+class TestFallingBack:
+    """
+    The public entry point never raises.
+
+    Whatever the model does, a caller gets a usable answer built from figures
+    that were already proved correct.
+    """
+
+    def test_an_unreachable_model_falls_back(self, client):
+        client.messages.create.side_effect = anthropic.APITimeoutError(request=mock.MagicMock())
+
+        response = llm.generate_insights(factories.facts_with_week_on_week())
+
+        assert response.source is schemas.InsightSource.FALLBACK
+        assert response.recommendations
+
+    def test_two_unusable_replies_fall_back(self, client):
+        client.messages.create.side_effect = [
+            tool_use_message(SCHEMA_BREAKING_REPLY),
+            tool_use_message(UNCITED_FACT_REPLY),
+        ]
+
+        response = llm.generate_insights(factories.facts_without_week_on_week())
+
+        assert response.source is schemas.InsightSource.FALLBACK
+
+    def test_a_missing_api_key_falls_back(self, settings, client):
+        settings.ANTHROPIC_API_KEY = ""
+
+        response = llm.generate_insights(factories.facts_with_week_on_week())
+
+        assert response.source is schemas.InsightSource.FALLBACK
+
+    def test_falling_back_is_logged_as_a_warning(self, client, caplog):
+        """
+        A fallback firing on every request looks identical to a healthy service
+        from the outside. That is the outage you hear about from a customer.
+        """
+        client.messages.create.side_effect = anthropic.APITimeoutError(request=mock.MagicMock())
+
+        llm.generate_insights(factories.facts_with_week_on_week())
+
+        assert any(record.levelname == "WARNING" for record in caplog.records)
+
+    def test_a_working_model_is_not_labelled_as_a_fallback(self, client):
+        response = llm.generate_insights(factories.facts_with_week_on_week())
+
+        assert response.source is schemas.InsightSource.MODEL
+
+
 class TestTheClient:
     def test_the_sdk_does_not_retry_behind_our_back(self):
         """
         The SDK retries twice by default, which would triple the latency and
-        cost of what looks like one call. The retry policy belongs in one
-        visible place instead.
+        cost of what looks like one call, and would fight the single deliberate
+        repair attempt above.
         """
         with mock.patch.object(anthropic, "Anthropic") as constructor:
             llm._client()

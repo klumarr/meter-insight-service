@@ -9,17 +9,23 @@ The model is treated throughout as an unreliable third party: it is given a
 bounded input, an explicit timeout, no opportunity to produce a number, and its
 reply is validated before any of it is believed.
 
-This module makes exactly one attempt. Retrying and falling back are deliberately
-not here yet.
+Two things happen when that validation fails. A reply the model could plausibly
+fix gets exactly one retry, with the objection sent back so it can see what was
+wrong. Anything past that hands over to the fallback, so the public entry point
+returns an answer no matter how the call goes.
 """
 
 import json
+import logging
+from dataclasses import dataclass
 from typing import Any
 
 import anthropic
 from django.conf import settings
 
-from insights import analytics, schemas
+from insights import analytics, fallback, schemas
+
+logger = logging.getLogger(__name__)
 
 TOOL_NAME = "submit_recommendations"
 
@@ -60,15 +66,53 @@ class InvalidModelOutputError(LLMError):
     """
 
 
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """The arguments the model supplied, and the id needed to answer the call."""
+
+    id: str
+    payload: dict[str, Any]
+
+
 def generate_insights(facts: analytics.ConsumptionFacts) -> schemas.InsightResponse:
     """
-    Turn computed facts into written recommendations.
+    Turn computed facts into written recommendations, whatever happens.
 
-    Raises LLMUnavailableError or InvalidModelOutputError rather than returning
-    anything doubtful. Deciding what to do about that is the caller's job.
+    This function does not raise. The model is a third party that will be slow,
+    unreachable or wrong on some proportion of calls, and none of those are the
+    caller's problem to solve. When the model cannot be used, the deterministic
+    fallback answers from the same facts and the response says so.
     """
-    payload = request_recommendations(build_prompt(facts))
-    model_response = parse_and_validate(payload, facts)
+    try:
+        return generate_from_model(facts)
+    except LLMError as failure:
+        # Logged at warning rather than swallowed: a fallback that fires on
+        # every request looks identical to a healthy service from the outside,
+        # and that is exactly the outage you find out about from a customer.
+        logger.warning("Falling back to templated insights: %s", failure)
+        return fallback.build_fallback(facts)
+
+
+def generate_from_model(facts: analytics.ConsumptionFacts) -> schemas.InsightResponse:
+    """
+    Ask the model, and give it exactly one chance to correct itself.
+
+    A rejected reply is worth retrying because the model can be shown what was
+    wrong with it. An unreachable model is not, so LLMUnavailableError is left
+    to propagate immediately rather than spending a second timeout on it.
+    """
+    messages: list[dict[str, Any]] = [{"role": "user", "content": build_prompt(facts)}]
+
+    call: ToolCall | None = None
+    try:
+        call = request_recommendations(messages)
+        model_response = parse_and_validate(call.payload, facts)
+    except InvalidModelOutputError as rejection:
+        logger.info("Retrying after rejected model output: %s", rejection)
+        retry_messages = _repair_messages(messages, failed_call=call, reason=str(rejection))
+        call = request_recommendations(retry_messages)
+        model_response = parse_and_validate(call.payload, facts)
+
     return schemas.build_response(model_response, facts=facts)
 
 
@@ -127,7 +171,7 @@ def summarise_facts(facts: analytics.ConsumptionFacts) -> dict[str, Any]:
     return summary
 
 
-def request_recommendations(prompt: str) -> dict[str, Any]:
+def request_recommendations(messages: list[dict[str, Any]]) -> ToolCall:
     """
     Make one call and return the raw arguments the model supplied.
 
@@ -144,7 +188,7 @@ def request_recommendations(prompt: str) -> dict[str, Any]:
             model=settings.ANTHROPIC_MODEL,
             max_tokens=settings.ANTHROPIC_MAX_TOKENS,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             tools=[
                 {
                     "name": TOOL_NAME,
@@ -164,11 +208,63 @@ def request_recommendations(prompt: str) -> dict[str, Any]:
 
     for block in message.content:
         if block.type == "tool_use" and block.name == TOOL_NAME:
-            return dict(block.input)
+            return ToolCall(id=block.id, payload=dict(block.input))
 
     # Forcing tool_choice makes this very unlikely, but "very unlikely" is not
     # "impossible" when the other end is a language model.
     raise InvalidModelOutputError(f"the model replied without calling {TOOL_NAME}")
+
+
+def _repair_messages(
+    messages: list[dict[str, Any]], *, failed_call: ToolCall | None, reason: str
+) -> list[dict[str, Any]]:
+    """
+    Extend the conversation with the rejected reply and the objection to it.
+
+    The model is shown its own output next to the specific reason it was
+    refused, which repairs far more reliably than simply being asked again. The
+    objection travels as a tool_result marked is_error, because a rejected tool
+    call is exactly what this is, and the model has been trained to act on one.
+
+    The reason strings come from schemas.check_citations and from Pydantic, both
+    of which name the offending field. They were always destined to be read by
+    the model rather than only by us.
+    """
+    if failed_call is None:
+        # It never called the tool, so there is no tool call to answer.
+        return [
+            *messages,
+            {
+                "role": "user",
+                "content": f"{reason}. You must reply by calling the {TOOL_NAME} tool.",
+            },
+        ]
+
+    return [
+        *messages,
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": failed_call.id,
+                    "name": TOOL_NAME,
+                    "input": failed_call.payload,
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": failed_call.id,
+                    "is_error": True,
+                    "content": f"Rejected: {reason} Correct it and call {TOOL_NAME} again.",
+                }
+            ],
+        },
+    ]
 
 
 def parse_and_validate(
