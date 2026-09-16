@@ -174,10 +174,45 @@ class TestPeakWindow:
         assert facts.peak_window.consumption_kwh == Decimal("30")
 
     def test_ties_resolve_to_the_earliest_window(self):
+        """
+        Two genuine peaks of identical size. Whichever is reported, it must be
+        the same one every time, because step 7 caches on these facts and a
+        cache key is only useful if identical input produces identical output.
+        """
+        values = dict.fromkeys(range(24), "1")
+        values.update({6: "10", 7: "10", 8: "10", 17: "10", 18: "10", 19: "10"})
+
+        facts = analytics.compute_facts(hourly_day(values))
+
+        assert facts.peak_window is not None
+        assert facts.peak_window.start_hour == 6
+
+    def test_evenly_spread_usage_has_no_peak(self):
+        """
+        Some window always holds the most, so "busiest" is not on its own a
+        finding. Here every window ties at exactly the 12.5% an even spread
+        puts in three hours, and reporting one as the peak would be
+        arithmetically true and completely misleading.
+
+        The fact is withheld rather than published, so nothing downstream can
+        advise shifting load away from a peak this household does not have.
+        """
         facts = analytics.compute_facts(hourly_day(dict.fromkeys(range(24), "1")))
 
-        assert facts.peak_window.start_hour == 0
-        assert facts.peak_window.end_hour == 3
+        assert facts.peak_window is None
+        assert analytics.FactKey.PEAK_WINDOW not in analytics.available_fact_keys(facts)
+        assert analytics.estimated_saving_kwh(analytics.FactKey.PEAK_WINDOW, facts) is None
+
+    def test_a_barely_concentrated_window_is_not_a_peak(self):
+        """The threshold is a judgement, so it is pinned by a test either side."""
+        just_under = dict.fromkeys(range(24), "1")
+        just_under.update({17: "1.3", 18: "1.3", 19: "1.3"})
+
+        clearly_over = dict.fromkeys(range(24), "1")
+        clearly_over.update({17: "3", 18: "3", 19: "3"})
+
+        assert analytics.compute_facts(hourly_day(just_under)).peak_window is None
+        assert analytics.compute_facts(hourly_day(clearly_over)).peak_window is not None
 
     def test_hours_are_expressed_in_the_requested_timezone(self):
         """

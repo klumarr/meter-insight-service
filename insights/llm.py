@@ -142,6 +142,10 @@ def summarise_facts(facts: analytics.ConsumptionFacts) -> dict[str, Any]:
     guardrail: if `week_on_week` comes back in `based_on`, we know for certain
     the reasoning was invented.
 
+    The keys here are exactly analytics.available_fact_keys, which is asserted
+    in the tests. The prompt therefore cannot offer a fact the citation check
+    will later refuse, and cannot withhold one it would have accepted.
+
     Decimals become strings so that the exact values survive JSON encoding.
     """
     summary: dict[str, Any] = {
@@ -152,14 +156,16 @@ def summarise_facts(facts: analytics.ConsumptionFacts) -> dict[str, Any]:
         analytics.FactKey.ESTIMATED_SHARE: {
             "percent_not_from_a_real_meter_read": str(facts.estimated_share_percent),
         },
-        analytics.FactKey.PEAK_WINDOW: {
+    }
+
+    if facts.peak_window is not None:
+        summary[analytics.FactKey.PEAK_WINDOW] = {
             "from_hour": facts.peak_window.start_hour,
             "to_hour": facts.peak_window.end_hour,
             "timezone": facts.timezone_name,
             "kwh_in_window": str(facts.peak_window.consumption_kwh),
             "percent_of_total": str(facts.peak_window.share_percent),
-        },
-    }
+        }
 
     if facts.week_on_week is not None:
         summary[analytics.FactKey.WEEK_ON_WEEK] = {

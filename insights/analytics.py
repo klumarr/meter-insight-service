@@ -26,6 +26,13 @@ PEAK_WINDOW_HOURS = 3
 # well covered relative to the later one. See _week_on_week for why.
 MINIMUM_COMPARABLE_COVERAGE = Decimal("0.9")
 
+# How much busier than an even spread a window has to be before it counts as a
+# peak. Three hours out of twenty-four hold 12.5% of the day no matter how the
+# usage falls, so a "peak" at 12.5% is not a finding, and advice to shift load
+# away from it rests on nothing. Requiring 1.3x an even spread means the window
+# is at least somewhat concentrated before the service will act on it.
+MEANINGFUL_PEAK_MULTIPLE = Decimal("1.3")
+
 # The share of peak-window consumption a household can realistically move to a
 # cheaper period. This is a stated assumption rather than a measured value, and
 # it lives here, named and tested, precisely so that it can be found, argued
@@ -110,6 +117,10 @@ class PeakWindow:
     Hours are given in the timezone the facts were computed in. end_hour is
     exclusive and may be lower than start_hour, because a window can wrap past
     midnight.
+
+    A household whose usage is evenly spread has no peak, and is described by
+    the absence of this object rather than by a window that technically holds
+    the most.
     """
 
     start_hour: int
@@ -151,7 +162,7 @@ class ConsumptionFacts:
     total_consumption_kwh: Decimal
     quality_breakdown: tuple[QualityBreakdown, ...]
     estimated_share_percent: Decimal
-    peak_window: PeakWindow
+    peak_window: PeakWindow | None
     week_on_week: WeekOnWeekChange | None
     timezone_name: str
 
@@ -203,15 +214,20 @@ def available_fact_keys(facts: ConsumptionFacts) -> frozenset[FactKey]:
     """
     The facts that were actually derived from a given reading set.
 
-    Three of the four always exist. WEEK_ON_WEEK does not, because the
-    comparison is withheld when there is too little history for it to mean
-    anything. A recommendation may only be attributed to a fact in this set.
+    Two of the four always exist. WEEK_ON_WEEK is withheld when there is too
+    little history for the comparison to mean anything, and PEAK_WINDOW when
+    usage is spread evenly enough that no window is worth calling a peak. In
+    both cases the figure could be produced, and would be arithmetically
+    correct, and would support advice that rests on nothing.
+
+    A recommendation may only be attributed to a fact in this set.
     """
     keys = {
         FactKey.TOTAL_CONSUMPTION,
         FactKey.ESTIMATED_SHARE,
-        FactKey.PEAK_WINDOW,
     }
+    if facts.peak_window is not None:
+        keys.add(FactKey.PEAK_WINDOW)
     if facts.week_on_week is not None:
         keys.add(FactKey.WEEK_ON_WEEK)
     return frozenset(keys)
@@ -235,6 +251,8 @@ def estimated_saving_kwh(fact_key: FactKey, facts: ConsumptionFacts) -> Decimal 
             return _round_kwh(increase) if increase > 0 else None
 
         case FactKey.PEAK_WINDOW:
+            if facts.peak_window is None:
+                return None
             return _round_kwh(facts.peak_window.consumption_kwh * SHIFTABLE_PEAK_SHARE)
 
         case FactKey.TOTAL_CONSUMPTION:
@@ -298,7 +316,15 @@ def _estimated_share_percent(readings: Sequence[Reading], *, total: Decimal) -> 
 
 def _peak_window(
     readings: Sequence[Reading], *, timezone: dt.tzinfo, width: int, total: Decimal
-) -> PeakWindow:
+) -> PeakWindow | None:
+    """
+    Find the busiest window of the day, if there is one.
+
+    Some window always holds more than the others, so "busiest" is not by itself
+    evidence of a habit. Returns None when the winner is no more concentrated
+    than chance would produce, because telling a customer to shift load away
+    from a peak they do not have is advice with nothing behind it.
+    """
     hourly = [Decimal(0)] * _HOURS_IN_DAY
     for reading in readings:
         hourly[reading.timestamp.astimezone(timezone).hour] += reading.value
@@ -318,11 +344,16 @@ def _peak_window(
             best_total = window_total
             best_start = start
 
+    share = _percentage(best_total, total)
+    even_spread = _percentage(Decimal(width), Decimal(_HOURS_IN_DAY))
+    if share < even_spread * MEANINGFUL_PEAK_MULTIPLE:
+        return None
+
     return PeakWindow(
         start_hour=best_start,
         end_hour=(best_start + width) % _HOURS_IN_DAY,
         consumption_kwh=best_total,
-        share_percent=_percentage(best_total, total),
+        share_percent=share,
     )
 
 

@@ -43,6 +43,50 @@ def half_hourly(
     ]
 
 
+# Hours 17, 18 and 19 hold six of the day's forty-eight half-hourly slots, and
+# are given 56.25% of its consumption. That is well clear of the 12.5% an even
+# spread would put there, so analytics reports a peak rather than withholding
+# one. The remaining 43.75% is divided evenly across the other forty-two slots.
+PEAK_HOURS = frozenset({17, 18, 19})
+_PEAK_SHARE = Decimal("0.5625")
+_PEAK_SLOTS = 6
+_OFF_PEAK_SLOTS = 42
+
+
+def peaked_half_hourly(
+    start: dt.datetime,
+    *,
+    days: int,
+    daily_kwh: str,
+    quality: ReadingQuality = ReadingQuality.ACTUAL,
+) -> list[analytics.Reading]:
+    """
+    Half-hourly readings with a pronounced evening peak.
+
+    The daily total is exactly `daily_kwh`, the same as the flat equivalent, so
+    totals and week-on-week figures are unaffected by the shape. Only the
+    distribution within the day changes, which is what a real household looks
+    like and what gives analytics a peak worth reporting.
+    """
+    daily = Decimal(daily_kwh)
+    # Quantised to the penny-equivalent so the readings carry the same scale a
+    # real meter would send, rather than the long tail Decimal division leaves
+    # behind. The chosen daily totals divide exactly, and the assertion below
+    # keeps it that way if anyone adds one that does not.
+    peak_value = (daily * _PEAK_SHARE / _PEAK_SLOTS).quantize(Decimal("0.01"))
+    off_peak_value = (daily * (1 - _PEAK_SHARE) / _OFF_PEAK_SLOTS).quantize(Decimal("0.01"))
+    assert peak_value * _PEAK_SLOTS + off_peak_value * _OFF_PEAK_SLOTS == daily, (
+        f"daily_kwh={daily_kwh} does not divide exactly across the day"
+    )
+
+    readings = []
+    for period in range(days * 48):
+        timestamp = start + dt.timedelta(minutes=30 * (period + 1))
+        value = peak_value if timestamp.hour in PEAK_HOURS else off_peak_value
+        readings.append(analytics.Reading(timestamp=timestamp, value=value, quality=quality))
+    return readings
+
+
 def facts_with_week_on_week() -> analytics.ConsumptionFacts:
     """
     Fourteen days of history, so every fact including week-on-week is available.
@@ -53,15 +97,15 @@ def facts_with_week_on_week() -> analytics.ConsumptionFacts:
     start = at(day=1)
     return analytics.compute_facts(
         [
-            *half_hourly(start, days=7, value="1.00"),
-            *half_hourly(start + dt.timedelta(days=7), days=7, value="1.20"),
+            *peaked_half_hourly(start, days=7, daily_kwh="48.00"),
+            *peaked_half_hourly(start + dt.timedelta(days=7), days=7, daily_kwh="57.60"),
         ]
     )
 
 
 def facts_without_week_on_week() -> analytics.ConsumptionFacts:
     """Five days of history, which is too little to compare one week to another."""
-    return analytics.compute_facts(half_hourly(at(day=1), days=5, value="1.00"))
+    return analytics.compute_facts(peaked_half_hourly(at(day=1), days=5, daily_kwh="48.00"))
 
 
 def facts_with_falling_usage() -> analytics.ConsumptionFacts:
@@ -69,15 +113,26 @@ def facts_with_falling_usage() -> analytics.ConsumptionFacts:
     start = at(day=1)
     return analytics.compute_facts(
         [
-            *half_hourly(start, days=7, value="1.20"),
-            *half_hourly(start + dt.timedelta(days=7), days=7, value="1.00"),
+            *peaked_half_hourly(start, days=7, daily_kwh="57.60"),
+            *peaked_half_hourly(start + dt.timedelta(days=7), days=7, daily_kwh="48.00"),
         ]
     )
 
 
+def facts_with_flat_usage() -> analytics.ConsumptionFacts:
+    """
+    Seven days of perfectly even usage, so no window counts as a peak.
+
+    Some three-hour window still holds more than the others, but only by the
+    rounding of an even spread. This is the case where reporting a peak would
+    be arithmetically true and completely misleading.
+    """
+    return analytics.compute_facts(half_hourly(at(day=1), days=7, value="1.00"))
+
+
 def facts_mostly_estimated() -> analytics.ConsumptionFacts:
     """
-    Seven days in which three quarters of the consumption was never measured.
+    Seven days in which most of the consumption was never measured.
 
     The figures are arithmetically correct and epistemically weak at the same
     time, which is the case worth having advice about.
@@ -85,9 +140,12 @@ def facts_mostly_estimated() -> analytics.ConsumptionFacts:
     start = at(day=1)
     return analytics.compute_facts(
         [
-            *half_hourly(start, days=5, value="1.00", quality=ReadingQuality.ESTIMATE),
-            *half_hourly(
-                start + dt.timedelta(days=5), days=2, value="1.00", quality=ReadingQuality.ACTUAL
+            *peaked_half_hourly(start, days=5, daily_kwh="48.00", quality=ReadingQuality.ESTIMATE),
+            *peaked_half_hourly(
+                start + dt.timedelta(days=5),
+                days=2,
+                daily_kwh="48.00",
+                quality=ReadingQuality.ACTUAL,
             ),
         ]
     )

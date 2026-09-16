@@ -15,7 +15,7 @@ from unittest import mock
 import anthropic
 import pytest
 
-from insights import llm, schemas
+from insights import analytics, llm, schemas
 from insights.tests import factories
 
 VALID_REPLY = {
@@ -90,6 +90,37 @@ class TestPromptConstruction:
 
         assert "week_on_week" not in summary
         assert "peak_window" in summary
+
+    @pytest.mark.parametrize(
+        "facts_builder",
+        [
+            factories.facts_with_week_on_week,
+            factories.facts_without_week_on_week,
+            factories.facts_with_flat_usage,
+            factories.facts_mostly_estimated,
+        ],
+    )
+    def test_the_prompt_offers_exactly_the_citable_facts(self, facts_builder):
+        """
+        The invariant the whole citation guardrail rests on.
+
+        If the prompt could offer a fact the citation check later refuses, a
+        well-behaved model would be punished for doing as it was told, and we
+        would burn a retry and probably a fallback on our own inconsistency.
+        If it withheld a fact the check would have accepted, we would be paying
+        for advice we made impossible to give.
+        """
+        facts = facts_builder()
+
+        offered = set(llm.summarise_facts(facts))
+
+        assert offered == analytics.available_fact_keys(facts)
+
+    def test_an_absent_peak_is_omitted_too(self):
+        facts = factories.facts_with_flat_usage()
+
+        assert facts.peak_window is None
+        assert "peak_window" not in llm.build_prompt(facts)
 
     def test_figures_are_sent_as_strings_to_survive_json(self):
         summary = llm.summarise_facts(factories.facts_with_week_on_week())

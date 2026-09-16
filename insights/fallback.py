@@ -103,6 +103,10 @@ def _peak_window_recommendation(
     facts: analytics.ConsumptionFacts,
 ) -> schemas.ModelRecommendation | None:
     window = facts.peak_window
+    if window is None:
+        # Evenly spread usage has no peak to shift load away from.
+        return None
+
     start = f"{window.start_hour:02d}:00"
     end = f"{window.end_hour:02d}:00"
 

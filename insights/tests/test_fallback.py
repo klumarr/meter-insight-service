@@ -121,6 +121,21 @@ class TestItOnlyStatesProvenFigures:
 
         peak = next(r for r in response.recommendations if r.based_on is FactKey.PEAK_WINDOW)
         assert facts.timezone_name in peak.rationale
+        assert "17:00 to 20:00" in peak.title
+
+    def test_it_will_not_advise_shifting_load_off_a_peak_that_does_not_exist(self):
+        """
+        Evenly spread usage has no peak, so analytics withholds the fact and
+        the fallback has nothing to cite. The advice disappears rather than
+        being generated from a window that only technically holds the most.
+        """
+        facts = factories.facts_with_flat_usage()
+
+        response = fallback.build_fallback(facts)
+
+        assert facts.peak_window is None
+        assert all(r.based_on is not FactKey.PEAK_WINDOW for r in response.recommendations)
+        assert response.recommendations
 
     def test_heavily_estimated_data_is_flagged_first(self):
         """
@@ -150,6 +165,7 @@ class TestItOnlyStatesProvenFigures:
         factories.facts_without_week_on_week,
         factories.facts_mostly_estimated,
         factories.facts_with_falling_usage,
+        factories.facts_with_flat_usage,
     ],
 )
 def test_no_set_of_facts_produces_an_unusable_answer(facts_builder):
