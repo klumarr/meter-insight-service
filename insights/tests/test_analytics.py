@@ -13,39 +13,10 @@ import pytest
 
 from insights import analytics
 from insights.analytics import ReadingQuality
+from insights.tests import factories
+from insights.tests.factories import at, half_hourly, hourly_day, reading
 
 LONDON = ZoneInfo("Europe/London")
-
-
-def at(day: int = 1, hour: int = 0, minute: int = 0, month: int = 1) -> dt.datetime:
-    return dt.datetime(2026, month, day, hour, minute, tzinfo=dt.UTC)
-
-
-def reading(
-    timestamp: dt.datetime,
-    value: str,
-    quality: ReadingQuality = ReadingQuality.ACTUAL,
-) -> analytics.Reading:
-    return analytics.Reading(timestamp=timestamp, value=Decimal(value), quality=quality)
-
-
-def hourly_day(values: dict[int, str], day: int = 1, month: int = 1) -> list[analytics.Reading]:
-    """One reading per hour of a single day, using the given hour/value mapping."""
-    return [reading(at(day=day, hour=hour, month=month), values[hour]) for hour in range(24)]
-
-
-def half_hourly(
-    start: dt.datetime,
-    *,
-    days: int,
-    value: str,
-    quality: ReadingQuality = ReadingQuality.ACTUAL,
-) -> list[analytics.Reading]:
-    """Readings every 30 minutes, timestamped at the end of each interval."""
-    return [
-        reading(start + dt.timedelta(minutes=30 * (period + 1)), value, quality)
-        for period in range(days * 48)
-    ]
 
 
 class TestValidation:
@@ -293,3 +264,94 @@ class TestWeekOnWeek:
 
         assert facts.total_consumption_kwh == Decimal("336.00")
         assert facts.week_on_week is None
+
+
+class TestAvailableFactKeys:
+    def test_all_four_facts_are_available_with_enough_history(self):
+        facts = factories.facts_with_week_on_week()
+
+        assert analytics.available_fact_keys(facts) == frozenset(analytics.FactKey)
+
+    def test_week_on_week_is_absent_when_it_was_withheld(self):
+        """
+        This set is what a recommendation is allowed to cite.
+
+        With too little history there is no week-on-week fact at all, so a
+        recommendation claiming to rest on one has invented its justification.
+        """
+        facts = factories.facts_without_week_on_week()
+
+        assert analytics.FactKey.WEEK_ON_WEEK not in analytics.available_fact_keys(facts)
+        assert analytics.FactKey.PEAK_WINDOW in analytics.available_fact_keys(facts)
+
+
+class TestEstimatedSaving:
+    def test_week_on_week_saving_is_exact_arithmetic(self):
+        """
+        No assumption is involved here.
+
+        Returning to the earlier week's usage saves precisely the difference
+        between the two weeks: 403.20 - 336.00.
+        """
+        facts = factories.facts_with_week_on_week()
+
+        saving = analytics.estimated_saving_kwh(analytics.FactKey.WEEK_ON_WEEK, facts)
+
+        assert saving == Decimal("67.20")
+
+    def test_no_week_on_week_saving_when_usage_fell(self):
+        start = at(day=1)
+        facts = analytics.compute_facts(
+            [
+                *half_hourly(start, days=7, value="2.00"),
+                *half_hourly(start + dt.timedelta(days=7), days=7, value="1.00"),
+            ]
+        )
+
+        assert analytics.estimated_saving_kwh(analytics.FactKey.WEEK_ON_WEEK, facts) is None
+
+    def test_no_week_on_week_saving_when_the_comparison_was_withheld(self):
+        facts = factories.facts_without_week_on_week()
+
+        assert analytics.estimated_saving_kwh(analytics.FactKey.WEEK_ON_WEEK, facts) is None
+
+    def test_peak_window_saving_applies_the_documented_share(self):
+        values = dict.fromkeys(range(24), "1")
+        values.update({17: "10", 18: "10", 19: "10"})
+        facts = analytics.compute_facts(hourly_day(values))
+
+        saving = analytics.estimated_saving_kwh(analytics.FactKey.PEAK_WINDOW, facts)
+
+        # 30 kWh in the peak window, of which SHIFTABLE_PEAK_SHARE (15%) is
+        # assumed to be movable.
+        assert facts.peak_window.consumption_kwh == Decimal("30")
+        assert saving == Decimal("4.50")
+
+    def test_total_consumption_saving_applies_the_documented_share(self):
+        facts = analytics.compute_facts(hourly_day(dict.fromkeys(range(24), "10")))
+
+        saving = analytics.estimated_saving_kwh(analytics.FactKey.TOTAL_CONSUMPTION, facts)
+
+        # 240 kWh total, of which GENERAL_EFFICIENCY_SHARE (5%) is assumed saveable.
+        assert facts.total_consumption_kwh == Decimal("240")
+        assert saving == Decimal("12.00")
+
+    def test_estimated_share_offers_no_kwh_saving(self):
+        """
+        Correcting reading accuracy changes the bill, not the consumption.
+
+        Reporting a kWh saving here would be a fiction, so none is given.
+        """
+        facts = factories.facts_with_week_on_week()
+
+        assert analytics.estimated_saving_kwh(analytics.FactKey.ESTIMATED_SHARE, facts) is None
+
+    def test_the_same_facts_always_produce_the_same_saving(self):
+        """The property a language model cannot offer."""
+        facts = factories.facts_with_week_on_week()
+
+        results = {
+            analytics.estimated_saving_kwh(analytics.FactKey.PEAK_WINDOW, facts) for _ in range(5)
+        }
+
+        assert len(results) == 1

@@ -26,7 +26,19 @@ PEAK_WINDOW_HOURS = 3
 # well covered relative to the later one. See _week_on_week for why.
 MINIMUM_COMPARABLE_COVERAGE = Decimal("0.9")
 
+# The share of peak-window consumption a household can realistically move to a
+# cheaper period. This is a stated assumption rather than a measured value, and
+# it lives here, named and tested, precisely so that it can be found, argued
+# with and changed. The alternative is a language model inventing a different
+# figure on every call, which nobody can find, explain or adjust.
+SHIFTABLE_PEAK_SHARE = Decimal("0.15")
+
+# The share of total consumption that general efficiency measures tend to save.
+# The same reasoning as SHIFTABLE_PEAK_SHARE applies.
+GENERAL_EFFICIENCY_SHARE = Decimal("0.05")
+
 _PERCENT_PRECISION = Decimal("0.1")
+_KWH_PRECISION = Decimal("0.01")
 _HOURS_IN_DAY = 24
 
 
@@ -44,6 +56,22 @@ class ReadingQuality(StrEnum):
     ESTIMATE = "ESTIMATE"
     CALCULATED = "CALCULATED"
     ZEROED = "ZEROED"
+
+
+# Every recommendation the service returns has to point at the fact it rests on.
+# That makes the advice checkable in seconds, and it makes a fabricated
+# justification detectable: a citation of a fact that was never derived is proof
+# the wording was invented rather than reasoned from the data.
+#
+# The docstring below is one line on purpose. It is published in the JSON schema
+# sent to the model, which makes it prompt text rather than developer notes.
+class FactKey(StrEnum):
+    """The facts a recommendation may be attributed to."""
+
+    TOTAL_CONSUMPTION = "total_consumption"
+    ESTIMATED_SHARE = "estimated_share"
+    PEAK_WINDOW = "peak_window"
+    WEEK_ON_WEEK = "week_on_week"
 
 
 class NotEnoughReadingsError(ValueError):
@@ -169,6 +197,58 @@ def compute_facts(
         week_on_week=_week_on_week(ordered),
         timezone_name=getattr(timezone, "key", str(timezone)),
     )
+
+
+def available_fact_keys(facts: ConsumptionFacts) -> frozenset[FactKey]:
+    """
+    The facts that were actually derived from a given reading set.
+
+    Three of the four always exist. WEEK_ON_WEEK does not, because the
+    comparison is withheld when there is too little history for it to mean
+    anything. A recommendation may only be attributed to a fact in this set.
+    """
+    keys = {
+        FactKey.TOTAL_CONSUMPTION,
+        FactKey.ESTIMATED_SHARE,
+        FactKey.PEAK_WINDOW,
+    }
+    if facts.week_on_week is not None:
+        keys.add(FactKey.WEEK_ON_WEEK)
+    return frozenset(keys)
+
+
+def estimated_saving_kwh(fact_key: FactKey, facts: ConsumptionFacts) -> Decimal | None:
+    """
+    How much consumption a recommendation resting on `fact_key` could save.
+
+    Returns None when no kWh figure would be honest, rather than inventing one.
+    The same facts always produce the same number, which is the entire point:
+    this is the calculation a language model is not permitted to make.
+    """
+    match fact_key:
+        case FactKey.WEEK_ON_WEEK:
+            if facts.week_on_week is None:
+                return None
+            # Not an assumption at all. Returning to the earlier week's usage
+            # saves exactly the difference between the two weeks.
+            increase = facts.week_on_week.latest_week_kwh - facts.week_on_week.previous_week_kwh
+            return _round_kwh(increase) if increase > 0 else None
+
+        case FactKey.PEAK_WINDOW:
+            return _round_kwh(facts.peak_window.consumption_kwh * SHIFTABLE_PEAK_SHARE)
+
+        case FactKey.TOTAL_CONSUMPTION:
+            return _round_kwh(facts.total_consumption_kwh * GENERAL_EFFICIENCY_SHARE)
+
+        case FactKey.ESTIMATED_SHARE:
+            # Replacing estimated readings with real ones corrects what the
+            # customer is billed for, not what they consume. A kWh saving here
+            # would be a fiction, so none is offered.
+            return None
+
+
+def _round_kwh(value: Decimal) -> Decimal:
+    return value.quantize(_KWH_PRECISION, rounding=ROUND_HALF_UP)
 
 
 def _percentage(part: Decimal, whole: Decimal) -> Decimal:
