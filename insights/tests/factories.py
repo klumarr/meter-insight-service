@@ -62,3 +62,32 @@ def facts_with_week_on_week() -> analytics.ConsumptionFacts:
 def facts_without_week_on_week() -> analytics.ConsumptionFacts:
     """Five days of history, which is too little to compare one week to another."""
     return analytics.compute_facts(half_hourly(at(day=1), days=5, value="1.00"))
+
+
+def facts_with_falling_usage() -> analytics.ConsumptionFacts:
+    """The mirror of facts_with_week_on_week: the later week is the lighter one."""
+    start = at(day=1)
+    return analytics.compute_facts(
+        [
+            *half_hourly(start, days=7, value="1.20"),
+            *half_hourly(start + dt.timedelta(days=7), days=7, value="1.00"),
+        ]
+    )
+
+
+def facts_mostly_estimated() -> analytics.ConsumptionFacts:
+    """
+    Seven days in which three quarters of the consumption was never measured.
+
+    The figures are arithmetically correct and epistemically weak at the same
+    time, which is the case worth having advice about.
+    """
+    start = at(day=1)
+    return analytics.compute_facts(
+        [
+            *half_hourly(start, days=5, value="1.00", quality=ReadingQuality.ESTIMATE),
+            *half_hourly(
+                start + dt.timedelta(days=5), days=2, value="1.00", quality=ReadingQuality.ACTUAL
+            ),
+        ]
+    )
