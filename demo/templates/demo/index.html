@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meter Insight Service</title>
+<style>
+  :root {
+    --bg: #fbfaf8;
+    --panel: #ffffff;
+    --ink: #1b1b19;
+    --muted: #6d6c66;
+    --line: #e4e2dc;
+    --model: #1f6f5c;
+    --model-bg: #e8f2ef;
+    --fallback: #9a5b09;
+    --fallback-bg: #fbf0df;
+    --withheld: #8c8a83;
+    --focus: #2b5fd9;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 0 1.5rem 4rem;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  .wrap { max-width: 68rem; margin: 0 auto; }
+
+  header { padding: 2.5rem 0 1.75rem; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0 0 .4rem; font-size: 1.6rem; letter-spacing: -.01em; }
+  header p { margin: 0; color: var(--muted); max-width: 46rem; }
+  header p strong { color: var(--ink); font-weight: 600; }
+  header .links { margin-top: .9rem; font-size: .85rem; }
+  header .links a { color: var(--focus); text-decoration: none; }
+  header .links a:hover { text-decoration: underline; }
+
+  h2 { font-size: .78rem; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin: 0 0 .75rem; font-weight: 600; }
+
+  .step { padding: 1.75rem 0; }
+
+  .scenarios { display: flex; flex-wrap: wrap; gap: .5rem; }
+
+  .scenario {
+    padding: .5rem .9rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--panel);
+    color: var(--ink);
+    font: inherit;
+    font-size: .9rem;
+    cursor: pointer;
+  }
+  .scenario:hover { border-color: #c9c6bd; }
+  .scenario[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .scenario:focus-visible, .send:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  .note { margin: .85rem 0 0; color: var(--muted); font-size: .9rem; max-width: 46rem; }
+
+  .send {
+    margin-top: 1.1rem;
+    padding: .65rem 1.2rem;
+    border: 0;
+    border-radius: 6px;
+    background: var(--focus);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .send:hover { background: #2450bb; }
+  .send[disabled] { opacity: .55; cursor: progress; }
+
+  .hint { margin: .7rem 0 0; font-size: .85rem; color: var(--muted); }
+  .hint code { background: #efeee9; padding: .1rem .35rem; border-radius: 3px; font-size: .85em; }
+
+  .status { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-bottom: 1.1rem; }
+
+  .badge { padding: .25rem .7rem; border-radius: 999px; font-size: .82rem; font-weight: 600; }
+  .badge.model { background: var(--model-bg); color: var(--model); }
+  .badge.fallback { background: var(--fallback-bg); color: var(--fallback); }
+  .meta { font-size: .85rem; color: var(--muted); }
+
+  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; align-items: start; }
+  @media (max-width: 860px) { .columns { grid-template-columns: 1fr; } }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem; }
+  .panel > h2 { margin-bottom: 1rem; }
+  .panel > h2 span { text-transform: none; letter-spacing: 0; font-weight: 400; }
+
+  .fact { padding: .7rem 0; border-top: 1px solid var(--line); transition: background .12s; }
+  .fact:first-of-type { border-top: 0; padding-top: 0; }
+  .fact .label { font-size: .82rem; color: var(--muted); }
+  .fact .value { font-size: 1rem; font-variant-numeric: tabular-nums; }
+  .fact .sub { font-size: .82rem; color: var(--muted); }
+  .fact.is-withheld .value { color: var(--withheld); font-style: italic; font-size: .92rem; }
+  .fact.lit { background: #fff6da; box-shadow: 0 0 0 .4rem #fff6da; border-radius: 3px; }
+
+  .rec { padding: 1rem 0; border-top: 1px solid var(--line); }
+  .rec:first-of-type { border-top: 0; padding-top: 0; }
+  .rec h3 { margin: 0 0 .35rem; font-size: 1rem; }
+  .rec p { margin: 0 0 .7rem; font-size: .92rem; color: #3c3b37; }
+  .chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .chip { font-size: .76rem; padding: .2rem .55rem; border-radius: 4px; background: #f2f1ec; color: var(--muted); }
+  .chip.cites { background: #fff6da; color: #7a5b00; font-weight: 600; cursor: help; }
+  .chip.saving { background: var(--model-bg); color: var(--model); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .error { background: #fdecec; border: 1px solid #f3c9c9; color: #8c2020; border-radius: 10px; padding: 1.1rem; }
+  .error pre { margin: .6rem 0 0; white-space: pre-wrap; font-size: .82rem; }
+
+  details.raw { margin-top: 1.25rem; }
+  details.raw summary { cursor: pointer; font-size: .85rem; color: var(--muted); }
+  details.raw pre {
+    margin: .75rem 0 0; padding: 1rem; overflow-x: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    font-size: .78rem; line-height: 1.5;
+  }
+
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Meter Insight Service</h1>
+  <p>
+    <strong>The code does all the arithmetic. The language model only writes the narrative.</strong>
+    The facts on the left are computed by <code>analytics.py</code> and never leave it. The model
+    receives those facts, chooses one to talk about, and writes a sentence around it — it never
+    calculates a figure and never sees a raw reading.
+  </p>
+  <p class="links">
+    This page is a client, not part of the service. It builds a request in your browser and POSTs
+    it to <code>/api/insights</code>, exactly as curl would.
+    <a href="https://github.com/klumarr/meter-insight-service">Source on GitHub</a>
+  </p>
+</header>
+
+<section class="step">
+  <h2>1 &middot; Choose a reading set</h2>
+  <div class="scenarios" id="scenarios"></div>
+  <p class="note" id="note"></p>
+  <button class="send" id="send" type="button">Send to POST /api/insights</button>
+  <p class="hint" id="hint"></p>
+</section>
+
+<section class="step" id="result" hidden>
+  <div class="status">
+    <span class="badge" id="badge"></span>
+    <span class="meta" id="meta"></span>
+  </div>
+  <div class="columns">
+    <div class="panel">
+      <h2>Facts <span>&mdash; computed by analytics.py</span></h2>
+      <div id="facts"></div>
+    </div>
+    <div class="panel">
+      <h2>Recommendations <span>&mdash; worded by the writer above</span></h2>
+      <div id="recs"></div>
+    </div>
+  </div>
+  <details class="raw">
+    <summary>Raw JSON response</summary>
+    <pre id="raw"></pre>
+  </details>
+</section>
+
+<section class="step" id="failure" hidden>
+  <div class="error">
+    <strong id="failure-title"></strong>
+    <pre id="failure-detail"></pre>
+  </div>
+</section>
+
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Reading sets.
+//
+// Built here in the browser rather than fetched from the server, because a
+// client that had to ask the service for its own request body would not be
+// demonstrating much. These mirror the four scenarios the eval suite runs
+// against the live model, so what you see here is what the evals graded.
+// ---------------------------------------------------------------------------
+
+const EPOCH = Date.UTC(2026, 0, 1);   // readings are stamped at the end of each interval
+const PEAK_HOURS = new Set([17, 18, 19]);
+const PEAK_SHARE = 0.5625;            // 56.25% of the day inside a 3-hour window
+const PEAK_SLOTS = 6;
+const OFF_PEAK_SLOTS = 42;
+
+function slots(dayOffset, days, quality, valueAt) {
+  const readings = [];
+  for (let slot = 0; slot < days * 48; slot++) {
+    const stamp = new Date(EPOCH + (dayOffset * 86400 + (slot + 1) * 1800) * 1000);
+    readings.push({
+      timestamp: stamp.toISOString(),
+      value: valueAt(stamp),
+      quality: quality,
+    });
+  }
+  return readings;
+}
+
+function peaked(dayOffset, days, dailyKwh, quality) {
+  const peak = (dailyKwh * PEAK_SHARE / PEAK_SLOTS).toFixed(2);
+  const offPeak = (dailyKwh * (1 - PEAK_SHARE) / OFF_PEAK_SLOTS).toFixed(2);
+  return slots(dayOffset, days, quality, (s) => PEAK_HOURS.has(s.getUTCHours()) ? peak : offPeak);
+}
+
+function flat(dayOffset, days, halfHourlyKwh, quality) {
+  const value = halfHourlyKwh.toFixed(2);
+  return slots(dayOffset, days, quality, () => value);
+}
+
+const SCENARIOS = [
+  {
+    id: "rising",
+    label: "Rising usage",
+    note: "Fourteen days with a pronounced evening peak, the second week 20% heavier than the first. " +
+          "All four facts are available, so the model has the full set to choose from.",
+    build: () => peaked(0, 7, 48, "ACTUAL").concat(peaked(7, 7, 57.6, "ACTUAL")),
+  },
+  {
+    id: "flat",
+    label: "Flat usage",
+    note: "Fourteen days of perfectly even consumption. Some three-hour window still holds more than " +
+          "the others, but only by the rounding of an even spread — so the peak is withheld, and " +
+          "nothing can advise you to shift load away from it.",
+    build: () => flat(0, 14, 1, "ACTUAL"),
+  },
+  {
+    id: "estimated",
+    label: "Mostly estimated",
+    note: "Seven days, five of which were never actually measured. The totals are arithmetically " +
+          "correct and epistemically weak at the same time, which the advice should say out loud.",
+    build: () => peaked(0, 5, 48, "ESTIMATE").concat(peaked(5, 2, 48, "ACTUAL")),
+  },
+  {
+    id: "short",
+    label: "Short history",
+    note: "Five days — too little to compare one week against another, so the week-on-week change is " +
+          "withheld rather than computed from a partial week and presented confidently.",
+    build: () => peaked(0, 5, 48, "ACTUAL"),
+  },
+];
+
+// Why a fact is absent. The API omits a withheld fact by sending null; these are
+// the client's own words for what that null means.
+const WITHHELD = {
+  peak_window: "Withheld \u2014 no window carries enough of the day to call it a peak",
+  week_on_week: "Withheld \u2014 not enough history for a like-for-like comparison",
+};
+
+// ---------------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------------
+
+const $ = (id) => document.getElementById(id);
+let chosen = SCENARIOS[0];
+let lastSent = null;
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function buildScenarioButtons() {
+  for (const scenario of SCENARIOS) {
+    const button = el("button", "scenario", scenario.label);
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(scenario === chosen));
+    button.addEventListener("click", () => choose(scenario));
+    $("scenarios").appendChild(button);
+  }
+}
+
+function choose(scenario) {
+  chosen = scenario;
+  for (const [index, button] of [...$("scenarios").children].entries()) {
+    button.setAttribute("aria-pressed", String(SCENARIOS[index] === scenario));
+  }
+  $("note").textContent = scenario.note;
+  $("hint").innerHTML =
+    "Sending the same reading set twice is a cache hit: the second call reuses the wording " +
+    "written for the first and never reaches the model. To watch the fallback take over, " +
+    "blank <code>ANTHROPIC_API_KEY</code> in <code>.env</code> and restart the server, or just " +
+    "turn off your wifi \u2014 the response stays a 200 either way.";
+}
+
+function facts(data) {
+  const target = $("facts");
+  target.replaceChildren();
+
+  const add = (key, label, value, sub) => {
+    const row = el("div", "fact");
+    if (key) row.dataset.fact = key;
+    if (value === null) row.classList.add("is-withheld");
+    row.appendChild(el("div", "label", label));
+    row.appendChild(el("div", "value", value === null ? WITHHELD[key] : value));
+    if (sub) row.appendChild(el("div", "sub", sub));
+    target.appendChild(row);
+  };
+
+  const f = data.facts;
+  const day = (iso) => new Date(iso).toISOString().slice(0, 10);
+
+  add(null, "Period covered",
+      day(f.period_start) + " to " + day(f.period_end),
+      f.days_covered + " days, " + f.reading_count.toLocaleString() + " readings");
+
+  add("total_consumption", "Total consumption", f.total_consumption_kwh + " kWh",
+      f.average_daily_kwh + " kWh per day on average");
+
+  add("estimated_share", "Reading quality", f.measured_share_percent + "% actually measured",
+      f.estimated_share_percent + "% estimated, calculated or substituted");
+
+  add("peak_window", "Peak window",
+      f.peak_window === null ? null
+        : String(f.peak_window.start_hour).padStart(2, "0") + ":00 to " +
+          String(f.peak_window.end_hour).padStart(2, "0") + ":00 " + f.timezone_name,
+      f.peak_window === null ? null
+        : f.peak_window.consumption_kwh + " kWh, " + f.peak_window.share_percent + "% of the total");
+
+  add("week_on_week", "Week on week",
+      f.week_on_week === null ? null
+        : (Number(f.week_on_week.change_percent) > 0 ? "+" : "") + f.week_on_week.change_percent + "%",
+      f.week_on_week === null ? null
+        : f.week_on_week.previous_week_kwh + " kWh then, " + f.week_on_week.latest_week_kwh + " kWh now");
+}
+
+function recommendations(data) {
+  const target = $("recs");
+  target.replaceChildren();
+
+  for (const rec of data.recommendations) {
+    const card = el("div", "rec");
+    card.appendChild(el("h3", null, rec.title));
+    card.appendChild(el("p", null, rec.rationale));
+
+    const chips = el("div", "chips");
+    const cites = el("span", "chip cites", "cites " + rec.based_on);
+    cites.title = "This recommendation rests on that fact, and the fact is on the left to check it against.";
+    chips.appendChild(cites);
+    chips.appendChild(el("span", "chip", rec.confidence + " confidence"));
+    chips.appendChild(
+      rec.estimated_saving_kwh === null
+        ? el("span", "chip", "no kWh figure offered")
+        : el("span", "chip saving", "\u2248 " + rec.estimated_saving_kwh + " kWh")
+    );
+    card.appendChild(chips);
+
+    // Hovering a recommendation lights up the fact it cites. The claim that every
+    // recommendation is traceable to one figure is easier to believe when you can
+    // see the figure light up.
+    const lit = () => document.querySelector('[data-fact="' + rec.based_on + '"]')?.classList.add("lit");
+    const dim = () => document.querySelector('[data-fact="' + rec.based_on + '"]')?.classList.remove("lit");
+    card.addEventListener("mouseenter", lit);
+    card.addEventListener("mouseleave", dim);
+    card.addEventListener("focusin", lit);
+    card.addEventListener("focusout", dim);
+
+    target.appendChild(card);
+  }
+}
+
+function show(data, milliseconds, readingCount) {
+  $("failure").hidden = true;
+  $("result").hidden = false;
+
+  $("badge").className = "badge " + data.source;
+  $("badge").textContent = data.source === "model" ? "written by the model" : "written by the fallback";
+
+  const cached = milliseconds < 250 && data.source === "model";
+  $("meta").textContent =
+    milliseconds + " ms" + (cached ? " (cache hit \u2014 the model was not called)" : "") +
+    " \u00b7 " + readingCount.toLocaleString() + " readings sent \u00b7 " +
+    data.recommendations.length + " recommendations";
+
+  facts(data);
+  recommendations(data);
+  $("raw").textContent = JSON.stringify(data, null, 2);
+}
+
+function failed(title, detail) {
+  $("result").hidden = true;
+  $("failure").hidden = false;
+  $("failure-title").textContent = title;
+  $("failure-detail").textContent = detail;
+}
+
+async function send() {
+  const readings = chosen.build();
+  const payload = { readings: readings, timezone: "Europe/London" };
+  lastSent = payload;
+
+  $("send").disabled = true;
+  $("send").textContent = "Waiting for the service\u2026";
+  const started = performance.now();
+
+  try {
+    const response = await fetch("/api/insights", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const elapsed = Math.round(performance.now() - started);
+    const body = await response.json();
+
+    if (response.ok) {
+      show(body, elapsed, readings.length);
+    } else {
+      // A 400 is the caller's fault and says which field. Worth showing rather
+      // than swallowing: it is half of the endpoint's contract.
+      failed(response.status + " \u2014 " + (body.error ?? "the request was rejected"),
+             JSON.stringify(body.detail ?? body, null, 2));
+    }
+  } catch (error) {
+    failed("The demo page could not reach the service", String(error));
+  } finally {
+    $("send").disabled = false;
+    $("send").textContent = "Send to POST /api/insights";
+  }
+}
+
+buildScenarioButtons();
+choose(chosen);
+$("send").addEventListener("click", send);
+</script>
+</body>
+</html>

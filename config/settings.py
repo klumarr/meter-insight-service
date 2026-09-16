@@ -1,10 +1,14 @@
 """
 Django settings for the Meter Insight Service.
 
-This is a stateless JSON API. It has no database, no sessions, no user accounts
-and no HTML templates: every value it returns is derived from the request body.
-The installed apps and middleware below are trimmed to match, so nothing is
-loaded that the service does not actually use.
+This is a stateless JSON API. It has no database, no sessions and no user
+accounts: every value it returns is derived from the request body. The installed
+apps and middleware below are trimmed to match, so nothing is loaded that the
+service does not actually use.
+
+The single HTML template in the project belongs to `demo`, which is a client of
+the API rather than a part of it. Template rendering is configured for that one
+page and nothing else.
 """
 
 import os
@@ -31,6 +35,10 @@ ALLOWED_HOSTS = [
 
 INSTALLED_APPS = [
     "insights",
+    # A demonstration client for the API, served at /. It is a separate app
+    # rather than another view inside `insights` because it consumes the service
+    # over HTTP like any other caller, and the directory boundary says so.
+    "demo",
 ]
 
 # No session or authentication middleware, because the service holds no per-user
@@ -42,6 +50,18 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = "config.urls"
+
+# APP_DIRS is what finds demo/templates/. There are no context processors because
+# the demo page receives no server-side context: it builds its request in the
+# browser and calls the public endpoint, so Django has nothing to inject into it.
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [],
+        "APP_DIRS": True,
+        "OPTIONS": {"context_processors": []},
+    }
+]
 
 WSGI_APPLICATION = "config.wsgi.application"
 

@@ -23,10 +23,10 @@ Three things in here are worth more than the feature list:
 - **The evals caught the model doing arithmetic it had been forbidden from
   doing**, in 2 of 20 sampled calls. The fix was not a sterner prompt.
   [What they found](#what-they-found).
-- **A running service found a bug that no unit test could have.** Two
-  recommendations cited the same fact, so one saving was reported twice. Every
-  individual figure was correct; the set of them was not.
-  [How it behaves](#how-it-behaves-when-the-model-misbehaves).
+- **Reading real output found two bugs that no unit test could have.** Two
+  recommendations cited the same fact, so one saving was reported twice; and an
+  unchanged week was reported as having "fell 0.0%". Every figure involved was
+  correct. [How it behaves](#how-it-behaves-when-the-model-misbehaves).
 - **Several figures are deliberately withheld** even though they are
   arithmetically correct, because a true number can still support a false claim.
   [What the service refuses to say](#what-the-service-refuses-to-say).
@@ -37,6 +37,57 @@ Three things in here are worth more than the feature list:
 If you have five minutes, read [`insights/analytics.py`](insights/analytics.py)
 for the arithmetic and [`insights/llm.py`](insights/llm.py) for the model
 boundary. The comments there explain the reasoning, not the mechanics.
+
+## See it running
+
+```bash
+git clone https://github.com/klumarr/meter-insight-service.git
+cd meter-insight-service
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python manage.py runserver
+```
+
+Then open <http://127.0.0.1:8000>.
+
+![The demo page, showing computed facts on the left and model-written recommendations on the right](docs/demo.png)
+
+**No API key is needed to try this.** Without one the model is unreachable, so
+every response is written by the fallback and labelled as such. That is not a
+degraded demo — it is the entire design visible in one request. Add a key to
+`.env` and the badge turns green. `.env` is gitignored and has been since the
+first commit; the key used to build this lives in a workspace with a spend cap.
+
+The page is a client, not a part of the service. It builds a request in the
+browser and POSTs it to `/api/insights` exactly as curl would, which means a
+demo that works is also evidence that the endpoint works. It offers the four
+reading sets the eval suite grades against the live model:
+
+| Reading set | What it shows |
+| --- | --- |
+| Rising usage | All four facts available, and three recommendations citing three different ones |
+| Flat usage | The peak window withheld — and nothing in the advice about shifting load |
+| Mostly estimated | 71% of the consumption never measured, and advice that says so |
+| Short history | The week-on-week change withheld, because five days cannot support one |
+
+Three things are worth doing while it is open:
+
+- **Send the same set twice.** The second is a cache hit, answered in single-digit
+  milliseconds without reaching the model.
+- **Hover a recommendation.** The fact it cites lights up on the left. That is
+  what "every recommendation is traceable to one figure" looks like.
+- **Turn off your wifi and send again.** Still a `200`, still useful advice, and
+  the badge tells you the fallback wrote it.
+
+To skip the page, a 672-reading request is committed as
+[`sample-request.json`](sample-request.json):
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/insights \
+  -H 'Content-Type: application/json' \
+  --data-binary @sample-request.json | python -m json.tool
+```
 
 ## The problem this is built around
 
@@ -97,6 +148,14 @@ the numbers do not depend on which writer produced the sentence around them.
 It also never had the duplicate problem, because it builds one recommendation
 per fact by construction. The model had to be policed into a property the
 deterministic path got for free.
+
+It had its own version of the same failure, though. Asking only whether usage
+had risen, and treating everything else as a fall, described an unchanged week
+as having "fell 0.0%" and then congratulated the customer on whatever had caused
+it — praise for an event that did not happen. The percentage was correct and the
+sentence was not. That one surfaced from clicking through the demo page, which
+is twice that reading real output caught something no assertion about the shape
+of the data would have.
 
 Responses say which writer produced them, in a `source` field. Quietly serving
 templated text as though it were generated is how a silent outage lasts weeks.
@@ -330,6 +389,7 @@ their problem and never reaches them as an error.
 | `insights/llm.py` | The only module that talks to the model |
 | `insights/fallback.py` | Recommendations written without one |
 | `insights/views.py` | The HTTP boundary, and nothing else |
+| `demo/` | A browser client for the API. Imports nothing from `insights`, and a test enforces it |
 
 All arithmetic uses `Decimal`. Binary floating point cannot represent decimal
 fractions exactly, and across thousands of readings those errors accumulate into
@@ -337,18 +397,7 @@ a total that does not match the customer's bill. Figures are serialised as JSON
 strings for the same reason — emitting `67.20` as a bare number invites the
 client's parser to turn it back into a float at the very last step.
 
-## Running it
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env     # then add an Anthropic API key
-python manage.py runserver
-```
-
-`.env` is gitignored and has been since the first commit. The key used to build
-this lives in a workspace with a hard spend cap.
+## The tests
 
 ```bash
 pytest

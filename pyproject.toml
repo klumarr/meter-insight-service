@@ -1,6 +1,6 @@
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings"
-testpaths = ["insights/tests"]
+testpaths = ["insights/tests", "demo/tests"]
 python_files = ["test_*.py"]
 markers = [
     "live: calls the real Anthropic API, so it costs money and needs a key",
